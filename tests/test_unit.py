@@ -32,7 +32,11 @@ class TestStrategy(unittest.TestCase):
                 'imbalance_depth_n': 5,
                 'imbalance_threshold': 2.0,
                 'overlay_bias': 1.0,
-                'persistence_seconds': 0
+                'persistence_seconds': 0,
+                # Extremes config - set to not interfere with mid=100
+                'extreme_low': 0.10,
+                'extreme_high': 990.0,  # High enough to not trigger
+                'extreme_spread_mult': 2.0,
             },
             'risk': {'max_inventory_units': 100.0}
         }
@@ -132,6 +136,56 @@ class TestTurbineAdapter(unittest.TestCase):
                 os.environ['TURBINE_API_KEY_ID'] = orig_api_key
             if orig_api_secret:
                 os.environ['TURBINE_API_PRIVATE_KEY'] = orig_api_secret
+
+class TestStrategyExtremes(unittest.TestCase):
+    def setUp(self):
+        self.config = {
+            'strategy': {
+                'base_spread': 0.02,  # 2%
+                'min_price': 0.01,
+                'max_price': 0.99,
+                'skew_factor': 0.01,
+                'imbalance_depth_n': 5,
+                'imbalance_threshold': 2.0,
+                'overlay_bias': 0.005,
+                'persistence_seconds': 0,
+                'extreme_low': 0.10,
+                'extreme_high': 0.90,
+                'extreme_spread_mult': 2.0,
+            },
+            'risk': {'max_inventory_units': 100.0}
+        }
+        self.state = StateStore()
+
+    def test_extremes_risk_control(self):
+        """Verify that quotes widen in extreme zones."""
+        # Neutral position
+        self.state.positions["TEST"] = 0.0
+        
+        engine = StrategyEngine(self.config, self.state)
+        
+        # Setup orderbook with extreme mid (5% = 0.05)
+        ob = self.state.get_orderbook("TEST")
+        ob.apply_delta(1, Side.BID, 0.04, 10.0)
+        ob.apply_delta(2, Side.ASK, 0.06, 10.0)
+        # Mid = 0.05, which is < extreme_low (0.10)
+        
+        bid, ask = engine.get_desired_quotes("TEST")
+        
+        # Should have quotes
+        self.assertIsNotNone(bid)
+        self.assertIsNotNone(ask)
+        
+        # Spread should be widened (> base_spread * extreme_spread_mult * 0.8)
+        # Base spread = 0.02, widened should be ~0.04
+        spread = ask - bid
+        base_spread = self.config['strategy']['base_spread']
+        expected_min_spread = base_spread * 1.5  # Conservative check
+        self.assertGreater(spread, expected_min_spread,
+                          f"Spread {spread} not widened enough (expected > {expected_min_spread})")
+        
+        # Should flag as extreme zone
+        self.assertTrue(engine.is_extreme_zone("TEST"))
 
 if __name__ == '__main__':
     unittest.main()

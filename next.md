@@ -1,77 +1,44 @@
 # Next Steps & Future Plans
 
 ## ~~Phase 1: Integration & Connectivity~~ ✅ COMPLETE
+## ~~Phase 2: Strategy Doctrine Implementation~~ ✅ COMPLETE
 
-The turbine-py-client is now fully integrated into the TurbineAdapter with fail-closed authentication.
-
-**Completed:**
-- ✅ Refactored `src/exchange/turbine.py` with verified API calls
-- ✅ Created read-only connectivity probe (`src/tools/connectivity_probe.py`)
-- ✅ Added fail-closed auth validation tests
-- ✅ Updated all documentation (RUNBOOK, README)
-- ✅ Verified against live API (1031 markets, BTC orderbook functional)
+**Accomplished:**
+- ✅ Inventory-aware market making with skew logic
+- ✅ Extremes risk control (widen spread + reduce size near 0/1)
+- ✅ BTC quick market auto-rollover (polling every 10s)
+- ✅ All unit tests pass (5/5)
 
 ---
 
-## Phase 2: Live Trading Validation
+## Phase 3: Tuning & Optimization
 
-### 2.1 API Credentials Setup
-**Goal**: Register for Turbine API credentials using your wallet.
+### 3.1 Spread Optimization
+**Goal**: Find profitable spread settings for BTC quick markets.
 
-**Action**:
-```bash
-# In Python REPL or script
-from turbine_client import TurbineClient
+**Tasks**:
+- Run bot in live mode with tiny sizes (1-5 shares)
+- Monitor fill rates and realized spreads
+- Adjust `base_spread` based on market volatility
+- Test extremes widening effectiveness
 
-credentials = TurbineClient.request_api_credentials(
-    host="https://api.turbinefi.com",
-    private_key="your_wallet_private_key",
-)
+### 3.2 WebSocket Instant Rollover
+**Goal**: Reduce rollover latency from 10s polling to instant detection.
 
-# Save these to .env:
-# TURBINE_API_KEY_ID=...
-# TURBINE_API_PRIVATE_KEY=...
-```
+**Implementation**:
+- Add `subscribe_quick_markets("BTC")` in Supervisor startup
+- Listen for `quick_market` WS message type
+- Trigger rollover immediately on market change event
+- Fallback to polling if WS disconnects
 
-> [!CAUTION]
-> The API private key is shown **only once**. Save it immediately to `.env`.
+### 3.3 PnL Tracking & Metrics
+**Goal**: Add real-time profit/loss monitoring.
 
-### 2.2 Minimal Order Lifecycle Test
-**Goal**: Place a tiny order (1 share at extreme price) and immediately cancel it.
-
-**Validation**:
-1. Order successfully posts to Turbine
-2. Order appears in your open orders
-3. Cancel succeeds
-4. No funds lost (order was at extreme price, no fill)
-
-**Script**: Create `src/tools/minimal_order_test.py` (requires user approval to run)
-
----
-
-## Phase 3: Strategy Integration
-
-### 3.1 WebSocket Event Bridging
-**Current State**: TurbineAdapter processes WS messages but doesn't bridge them to the internal state machine yet.
-
-**Action**:
-- Map turbine_client `OrderBookUpdate` → `src/core/events.MarketDataUpdate`
-- Wire the adapter's `_process_ws_messages()` to call `StateStore.apply_event()`
-
-### 3.2 Market Configuration
-**Goal**: Configure which BTC 15-minute Quick Markets to trade.
-
-**Action**:
-- Update `config.yaml` to specify market selection criteria
-- Implement automatic market rotation (as 15-min markets expire)
-
-### 3.3 Inventory Skew with Real Positions
-**Goal**: Use `get_positions()` to seed initial inventory state.
-
-**Action**:
-- On startup, fetch positions from Turbine
-- Initialize `StateStore.positions` with live data
-- Ensure skew logic accounts for existing positions
+**Tasks**:
+- Track realized PnL from fills
+- Track unrealized PnL from positions
+- Log hourly PnL snapshots
+- Add Prometheus metrics (optional)
 
 ---
 

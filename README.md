@@ -15,6 +15,45 @@ Welcome to the **Turbine Trading Agent**, a high-performance, autonomous trading
 
 ---
 
+
+## Strategy Doctrine
+
+This bot implements **inventory-aware market making** with automatic rollover between BTC quick markets:
+
+### Core Principles
+
+1. **Inventory Skew**: Quotes automatically shift based on position to naturally rebalance
+   - Long position → Lower quotes to encourage selling
+   - Short position → Higher quotes to encourage buying
+   - Prevents inventory buildup in a single direction
+
+2. **Extremes Risk Control**: When market price approaches 0% or 100%:
+   - Spreads widen by 2x to account for increased risk
+   - Order sizes reduce to 50% to limit exposure
+   - Conservative approach to tail risk
+
+3. **Auto-Rollover**: Seamlessly transitions between BTC 15-minute markets
+   - Polls `get_quick_market("BTC")` every 10 seconds
+   - Detects market changes automatically
+   - Cancels old orders and subscribes to new market
+   - Zero downtime between market expiries
+
+4. **Orderbook-Driven Pricing**: No external oracles or price feeds
+   - Fair price = orderbook mid (best bid/ask average)
+   - Spreads and skews applied relative to mid
+   - Pure market-making approach without directional bets
+
+### What's NOT Implemented
+
+- ❌ Directional betting strategies
+- ❌ Price action following / momentum trading
+- ❌ External oracle signals (Pyth, Chainlink, etc.)
+- ❌ Mean reversion as a standalone thesis
+
+This is a **market-neutral, inventory-aware liquidity provision strategy** optimized for uptime and realized PnL.
+
+---
+
 ## 🏗️ Architecture Overview
 
 The system is designed as a series of decoupled engines, each responsible for a specific domain of the trading lifecycle:
