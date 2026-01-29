@@ -2,16 +2,24 @@
 
 ## ~~Phase 1: Integration & Connectivity~~ ✅ COMPLETE
 ## ~~Phase 2: Strategy Doctrine Implementation~~ ✅ COMPLETE
+## ~~Extremes Risk Control Ordering Fix~~ ✅ COMPLETE
 
 **Accomplished:**
 - ✅ Inventory-aware market making with skew logic
-- ✅ Extremes risk control (widen spread + reduce size near 0/1)
+- ✅ Extremes risk control (widen spread around fair price BEFORE skew)
 - ✅ BTC quick market auto-rollover (polling every 10s)
 - ✅ All unit tests pass (5/5)
 
 ---
 
 ## Phase 3: Tuning & Optimization
+
+### 3.0 Evaluate Expiry-Time (T-minus) Flattening Logic
+**Goal**: Determine if bot should reduce inventory and widen spreads as market approaches expiry.
+
+**Rationale**: As 15-minute markets approach expiration, liquidity may thin and resolution risk increases.
+
+**Consideration**: Evaluate whether to implement T-minus logic or rely on rollover + extremes control.
 
 ### 3.1 Spread Optimization
 **Goal**: Find profitable spread settings for BTC quick markets.

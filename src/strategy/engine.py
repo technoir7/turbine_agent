@@ -25,78 +25,64 @@ class StrategyEngine:
         if not mid:
             return None, None
             
-        # 1. Base Parameters
-        spread = self.strategy_config['base_spread']
-        skew_factor = self.strategy_config['skew_factor']
+        # 1. Fair Price
+        fair = mid  # + EMA logic if implemented
         
-        # 2. Inventory Skew
+        # 2. Base Spread
+        base_spread = self.strategy_config['base_spread']
+        base_half_spread = base_spread / 2.0
+        
+        # 3. Extremes Risk Control (applied to spread BEFORE skew/overlay)
+        extreme_low = self.strategy_config.get('extreme_low', 0.10)
+        extreme_high = self.strategy_config.get('extreme_high', 0.90)
+        extreme_spread_mult = self.strategy_config.get('extreme_spread_mult', 2.0)
+        
+        in_extreme_zone = fair < extreme_low or fair > extreme_high
+        
+        if in_extreme_zone:
+            widened_half_spread = base_half_spread * extreme_spread_mult
+            logger.debug(f"Extremes zone: fair={fair:.3f}, widening spread by {extreme_spread_mult}x")
+        else:
+            widened_half_spread = base_half_spread
+        
+        # 4. Preliminary bid/ask around FAIR (with widened spread if extreme)
+        preliminary_bid = fair - widened_half_spread
+        preliminary_ask = fair + widened_half_spread
+        
+        # 5. Inventory Skew
         # skew = -1 * (pos / max_pos) * skew_factor
         # If long, bias down (lower bid, lower ask) to sell
         # If short, bias up (higher bid, higher ask) to buy
         pos = self.state.positions.get(market_id, 0.0)
         max_pos = self.risk_config.get('max_inventory_units', 1000.0)
+        skew_factor = self.strategy_config['skew_factor']
         
         skew = -1 * (pos / max_pos) * skew_factor
         
-        # 3. Imbalance Overlay
+        # 6. Imbalance Overlay
         imbalance = book.get_imbalance(self.strategy_config['imbalance_depth_n'])
         overlay = 0.0
         
-        threshold = self.strategy_config['imbalance_threshold'] # e.g. 2.0
+        threshold = self.strategy_config['imbalance_threshold']  # e.g. 2.0
         bias = self.strategy_config['overlay_bias']
-        
-        # High Bid depth -> Bias Ask Down (sell into strength? or assumes pressure up?)
-        # Wait, Std logic: 
-        # High Bid Depth relative to Ask Depth => Buy Pressure => Price likely UP
-        # So we should Skew UP to capture move? 
-        # Or if we want to MM, and there is huge buy wall, maybe we sell into it?
-        # The prompt says: 
-        # "if imbalance > 2.0: bias ask downward by bias_amt" (Implies: lots of bids, maybe we want to fill asks? or indicates selling pressure?)
-        # Actually usually: Bid/Ask > 2 => Lots of Bids.
-        # User spec: "bias ask downward". Okay, following spec.
         
         if imbalance > threshold:
              overlay = -bias
         elif imbalance < (1.0/threshold):
              overlay = bias
              
-        # 4. Final Calculation
-        fair = mid # + Ema logic if impl
+        # 7. Apply skew and overlay to preliminary quotes
+        final_bid = preliminary_bid + skew + overlay
+        final_ask = preliminary_ask + skew + overlay
         
-        final_bid = fair - (spread / 2.0) + skew + overlay
-        final_ask = fair + (spread / 2.0) + skew + overlay
-        
-        # 5. Clamps
+        # 8. Clamp to min/max price
         min_p = self.strategy_config['min_price']
         max_p = self.strategy_config['max_price']
         
         final_bid = max(min_p, min(final_bid, max_p))
         final_ask = max(min_p, min(final_ask, max_p))
         
-        # 6. Extremes Risk Control
-        # Near 0 or 1, widen spread and reduce size
-        extreme_low = self.strategy_config.get('extreme_low', 0.10)
-        extreme_high = self.strategy_config.get('extreme_high', 0.90)
-        extreme_spread_mult = self.strategy_config.get('extreme_spread_mult', 2.0)
-        
-        # Check if we're in extreme zone
-        in_extreme_zone = fair < extreme_low or fair > extreme_high
-        
-        if in_extreme_zone:
-            # Widen spread by multiplier
-            current_half_spread = (final_ask - final_bid) / 2.0
-            midpoint = (final_bid + final_ask) / 2.0
-            widened_half_spread = current_half_spread * extreme_spread_mult
-            
-            final_bid = midpoint - widened_half_spread
-            final_ask = midpoint + widened_half_spread
-            
-            # Re-clamp after widening
-            final_bid = max(min_p, min(final_bid, max_p))
-            final_ask = max(min_p, min(final_ask, max_p))
-            
-            logger.debug(f"Extremes zone: fair={fair:.3f}, widened spread by {extreme_spread_mult}x")
-        
+        # 9. Sanity check
         if final_bid >= final_ask:
             # Spread crossed due to skew/overlay - back off
             return None, None

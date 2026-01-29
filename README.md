@@ -27,10 +27,12 @@ This bot implements **inventory-aware market making** with automatic rollover be
    - Short position → Higher quotes to encourage buying
    - Prevents inventory buildup in a single direction
 
-2. **Extremes Risk Control**: When market price approaches 0% or 100%:
-   - Spreads widen by 2x to account for increased risk
+2. **Extremes Risk Control**: When fair price approaches 0% or 100%:
+   - Spreads widen by 2x **around fair price** (applied before skew/overlay)
+   - This ensures conservative, risk-reducing behavior
    - Order sizes reduce to 50% to limit exposure
-   - Conservative approach to tail risk
+   - Prevents amplifying inventory bias at probability extremes
+
 
 3. **Auto-Rollover**: Seamlessly transitions between BTC 15-minute markets
    - Polls `get_quick_market("BTC")` every 10 seconds

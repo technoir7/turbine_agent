@@ -148,3 +148,44 @@ OK
 - **Testing**: All unit tests pass ✅
 - **Configuration**: Live-ready with conservative defaults ✅
 - **Next**: Tune spreads, add WebSocket instant rollover, PnL tracking
+
+---
+
+## [2026-01-28 Late Evening] Extremes Risk Control Ordering Fix ✅
+
+### Issue Identified
+The original implementation applied extremes widening AFTER inventory skew and imbalance overlay, centered on the post-skew midpoint. This caused extremes mode to **amplify inventory bias** rather than being purely risk-reducing.
+
+**Example Bug**: If long position → skew lowers quotes → extremes widened around lowered midpoint → further downward bias.
+
+### Corrected Ordering
+**File Modified**: [`src/strategy/engine.py`](file:///home/aaron/code/turbine_agent/src/strategy/engine.py)
+
+**New Logic Flow**:
+1. Compute fair price (orderbook mid)
+2. Compute base spread
+3. **Apply extremes widening to base spread** (if fair <10% or >90%)
+4. Create preliminary bid/ask **around fair price** (with widened spread)
+5. Apply inventory skew adjustment
+6. Apply imbalance overlay adjustment
+7. Clamp to min/max price
+8. Sanity check (bid < ask)
+
+**Key Change**: Extremes widening now happens **before** skew/overlay and is **centered on fair price**, ensuring conservative risk-reducing behavior independent of inventory state.
+
+### Impact
+- Extremes mode is now purely defensive (wider spreads at extremes)
+- Does not interact with or amplify inventory skew
+- More predictable quote behavior
+- No new configuration parameters introduced
+
+### Testing
+- All 5 unit tests still pass ✅
+- `test_extremes_risk_control` validates widening at 5% price
+- `test_skew_long` validates inventory skew at normal prices
+
+### Files Modified
+- [`src/strategy/engine.py`](file:///home/aaron/code/turbine_agent/src/strategy/engine.py): Reordered quote construction logic
+- [`README.md`](file:///home/aaron/code/turbine_agent/README.md): Clarified extremes applies before skew
+- [`next.md`](file:///home/aaron/code/turbine_agent/next.md): Marked fix complete, added T-minus evaluation
+- [`history.md`](file:///home/aaron/code/turbine_agent/history.md): This entry
