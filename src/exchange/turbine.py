@@ -1,0 +1,384 @@
+"""Turbine exchange adapter implementation using turbine-py-client."""
+import logging
+import asyncio
+import os
+from typing import List, Optional, Dict, Any, Callable, Awaitable
+from .interface import ExchangeAdapter
+from ..core.events import Side, OrderStatus
+from ..core.state import Order
+
+logger = logging.getLogger(__name__)
+
+# Verified constants from turbine-py-client examples
+DEFAULT_HOST = "https://api.turbinefi.com"
+DEFAULT_CHAIN_ID = 137  # Polygon mainnet
+
+
+class TurbineAdapter(ExchangeAdapter):
+    """
+    Turbine adapter implementation using turbine-py-client.
+    
+    Read-only operations work without authentication.
+    Trading operations require environment variables:
+        - TURBINE_PRIVATE_KEY
+        - TURBINE_API_KEY_ID
+        - TURBINE_API_PRIVATE_KEY
+    """
+    
+    def __init__(self, config: Dict):
+        """Initialize the Turbine adapter.
+        
+        Args:
+            config: Configuration dictionary with exchange settings.
+        """
+        self.config = config
+        self.callbacks: List[Callable] = []
+        
+        # Load configuration
+        self._host = config.get('exchange', {}).get('base_url', DEFAULT_HOST)
+        self._chain_id = config.get('exchange', {}).get('chain_id', DEFAULT_CHAIN_ID)
+        
+        # Load credentials from environment
+        # Try TURBINE_* first, then INTEGRATION_* as fallback (from examples)
+        self._private_key = os.environ.get('TURBINE_PRIVATE_KEY') or \
+                           os.environ.get('INTEGRATION_WALLET_PRIVATE_KEY')
+        self._api_key_id = os.environ.get('TURBINE_API_KEY_ID') or \
+                          os.environ.get('INTEGRATION_API_KEY_ID')
+        self._api_private_key = os.environ.get('TURBINE_API_PRIVATE_KEY') or \
+                               os.environ.get('INTEGRATION_API_PRIVATE_KEY')
+        
+        # Initialize REST client
+        try:
+            from turbine_client import TurbineClient
+            
+            # If we have all auth credentials, create authenticated client
+            if self._private_key and self._api_key_id and self._api_private_key:
+                self._rest_client = TurbineClient(
+                    host=self._host,
+                    chain_id=self._chain_id,
+                    private_key=self._private_key,
+                    api_key_id=self._api_key_id,
+                    api_private_key=self._api_private_key,
+                )
+                logger.info("TurbineAdapter: Initialized with authentication")
+            else:
+                # Read-only client
+                self._rest_client = TurbineClient(
+                    host=self._host,
+                    chain_id=self._chain_id,
+                )
+                logger.info("TurbineAdapter: Initialized in read-only mode")
+                logger.warning(
+                    "Trading disabled: Set TURBINE_PRIVATE_KEY, TURBINE_API_KEY_ID, "
+                    "and TURBINE_API_PRIVATE_KEY to enable trading"
+                )
+        except ImportError as e:
+            logger.error(f"Failed to import turbine_client: {e}")
+            raise
+        
+        # WebSocket client (lazy initialization)
+        self._ws_client = None
+        self._ws_connection = None
+        self._ws_task = None
+        
+        # Market cache for settlement addresses
+        self._market_cache: Dict[str, Any] = {}
+
+    def _require_auth(self):
+        """Raise error if trading credentials are not configured."""
+        if not (self._private_key and self._api_key_id and self._api_private_key):
+            raise NotImplementedError(
+                "Trading requires authentication. Set these environment variables:\n"
+                "  - TURBINE_PRIVATE_KEY\n"
+                "  - TURBINE_API_KEY_ID\n"
+                "  - TURBINE_API_PRIVATE_KEY\n"
+            )
+
+    async def connect(self):
+        """Connect to WebSocket and start listening for updates."""
+        try:
+            from turbine_client import TurbineWSClient
+            
+            # Use ws:// variant of the host (websocket_stream.py example)
+            ws_url = self.config.get('exchange', {}).get('ws_url', self._host)
+            
+            logger.info(f"TurbineAdapter: Connecting to WebSocket at {ws_url}")
+            self._ws_client = TurbineWSClient(host=ws_url)
+            self._ws_connection = await self._ws_client.connect().__aenter__()
+            
+            # Start background task to process WS messages
+            self._ws_task = asyncio.create_task(self._process_ws_messages())
+            
+            logger.info("TurbineAdapter: WebSocket connected")
+        except Exception as e:
+            logger.error(f"TurbineAdapter: Failed to connect WebSocket: {e}")
+            raise
+
+    async def _process_ws_messages(self):
+        """Background task to process incoming WebSocket messages."""
+        try:
+            async for message in self._ws_connection:
+                # Dispatch to registered callbacks
+                for callback in self.callbacks:
+                    try:
+                        await callback(message)
+                    except Exception as e:
+                        logger.error(f"Callback error: {e}")
+        except asyncio.CancelledError:
+            logger.info("WebSocket message processor cancelled")
+        except Exception as e:
+            logger.error(f"WebSocket message processor error: {e}")
+
+    async def close(self):
+        """Clean shutdown."""
+        logger.info("TurbineAdapter: Closing connections")
+        
+        # Cancel WS task
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Close WS connection
+        if self._ws_connection:
+            try:
+                await self._ws_connection.__aexit__(None, None, None)
+            except Exception as e:
+                logger.error(f"Error closing WS connection: {e}")
+        
+        # Close REST client
+        if self._rest_client:
+            self._rest_client.close()
+
+    async def subscribe_markets(self, market_ids: List[str]):
+        """Subscribe to market data topics.
+        
+        Args:
+            market_ids: List of market IDs to subscribe to.
+        """
+        if not self._ws_connection:
+            raise RuntimeError("WebSocket not connected. Call connect() first.")
+        
+        logger.info(f"TurbineAdapter: Subscribing to {len(market_ids)} markets")
+        
+        for market_id in market_ids:
+            try:
+                # Subscribe to orderbook updates (from websocket_stream.py example)
+                await self._ws_connection.subscribe_orderbook(market_id)
+                # Optionally subscribe to trades
+                await self._ws_connection.subscribe_trades(market_id)
+            except Exception as e:
+                logger.error(f"Failed to subscribe to market {market_id}: {e}")
+
+    async def place_order(self, order: Order) -> str:
+        """Place order via REST API.
+        
+        Args:
+            order: Order to place.
+            
+        Returns:
+            Exchange order ID (order_hash).
+            
+        Raises:
+            NotImplementedError: If authentication is not configured.
+        """
+        self._require_auth()
+        
+        try:
+            from turbine_client.types import Outcome, Side as TurbineSide
+            
+            # Get market settlement address (required for order signing)
+            market = await self._get_market(order.market_id)
+            settlement_address = market.settlement_address
+            
+            # Map our Side enum to turbine Side
+            turbine_side = TurbineSide.BUY if order.side == Side.BID else TurbineSide.SELL
+            
+            # For now, assume YES outcome (TODO: derive from order or config)
+            turbine_outcome = Outcome.YES
+            
+            # Create and sign the order
+            if turbine_side == TurbineSide.BUY:
+                signed_order = self._rest_client.create_limit_buy(
+                    market_id=order.market_id,
+                    outcome=turbine_outcome,
+                    price=int(order.price * 10000),  # Convert to turbine price scale
+                    size=int(order.size * 1_000_000),  # Convert to turbine size (6 decimals)
+                    settlement_address=settlement_address,
+                )
+            else:
+                signed_order = self._rest_client.create_limit_sell(
+                    market_id=order.market_id,
+                    outcome=turbine_outcome,
+                    price=int(order.price * 10000),
+                    size=int(order.size * 1_000_000),
+                    settlement_address=settlement_address,
+                )
+            
+            # Submit the order
+            result = self._rest_client.post_order(signed_order)
+            order_hash = result.get('orderHash', signed_order.order_hash)
+            
+            logger.info(f"Order placed: {order_hash}")
+            return order_hash
+            
+        except Exception as e:
+            logger.error(f"Failed to place order: {e}")
+            raise
+
+    async def cancel_order(self, order: Order):
+        """Cancel specific order.
+        
+        Args:
+            order: Order to cancel (must have exchange_order_id set).
+        """
+        self._require_auth()
+        
+        try:
+            from turbine_client.types import Side as TurbineSide
+            
+            turbine_side = TurbineSide.BUY if order.side == Side.BID else TurbineSide.SELL
+            
+            result = self._rest_client.cancel_order(
+                order_hash=order.exchange_order_id,
+                market_id=order.market_id,
+                side=turbine_side,
+            )
+            
+            logger.info(f"Order cancelled: {order.exchange_order_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to cancel order: {e}")
+            raise
+
+    async def cancel_all(self, market_id: Optional[str] = None):
+        """Cancel all open orders (safety switch).
+        
+        Args:
+            market_id: Optional market ID to restrict cancellation to.
+        """
+        self._require_auth()
+        
+        logger.info(f"TurbineAdapter: cancel_all triggered for market {market_id}")
+        
+        try:
+            from turbine_client.types import Side as TurbineSide
+            
+            # Fetch open orders
+            open_orders = self._rest_client.get_orders(
+                trader=self._rest_client.address,
+                market_id=market_id,
+                status="open",
+            )
+            
+            logger.info(f"Cancelling {len(open_orders)} open orders")
+            
+            for turbine_order in open_orders:
+                try:
+                    side = TurbineSide.BUY if turbine_order.side == 0 else TurbineSide.SELL
+                    self._rest_client.cancel_order(
+                        order_hash=turbine_order.order_hash,
+                        market_id=turbine_order.market_id,
+                        side=side,
+                    )
+                    logger.info(f"Cancelled order: {turbine_order.order_hash}")
+                except Exception as e:
+                    logger.error(f"Failed to cancel order {turbine_order.order_hash}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"cancel_all failed: {e}")
+            raise
+
+    async def get_positions(self) -> Dict[str, float]:
+        """Fetch current positions snapshot.
+        
+        Returns:
+            Dictionary mapping market_id to net position (positive = long).
+        """
+        if not self._private_key:
+            logger.warning("get_positions: No auth configured, returning empty")
+            return {}
+        
+        try:
+            positions = self._rest_client.get_user_positions(
+                address=self._rest_client.address,
+                chain_id=self._chain_id,
+            )
+            
+            # Convert to dict: market_id -> net_position
+            result = {}
+            for pos in positions:
+                # net = yes_shares - no_shares (in contract units, 6 decimals)
+                net_shares = (pos.yes_shares - pos.no_shares) / 1_000_000
+                result[pos.market_id] = net_shares
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch positions: {e}")
+            return {}
+
+    async def get_open_orders(self) -> List[Order]:
+        """Fetch open orders snapshot.
+        
+        Returns:
+            List of Order objects representing open orders.
+        """
+        if not self._private_key:
+            logger.warning("get_open_orders: No auth configured, returning empty")
+            return []
+        
+        try:
+            turbine_orders = self._rest_client.get_orders(
+                trader=self._rest_client.address,
+                status="open",
+            )
+            
+            # Convert turbine Order objects to our Order objects
+            orders = []
+            for to in turbine_orders:
+                our_side = Side.BID if to.side == 0 else Side.ASK
+                orders.append(Order(
+                    order_id=to.order_hash,  # Use order_hash as ID
+                    market_id=to.market_id,
+                    side=our_side,
+                    price=to.price / 10000,  # Convert from turbine scale
+                    size=to.remaining_size / 1_000_000,  # Convert from 6 decimals
+                    exchange_order_id=to.order_hash,
+                ))
+            
+            return orders
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch open orders: {e}")
+            return []
+
+    def register_callback(self, callback: Callable[[Any], Awaitable[None]]):
+        """Register generic event callback for incoming WS messages.
+        
+        Args:
+            callback: Async function to call with each WebSocket message.
+        """
+        self.callbacks.append(callback)
+
+    async def _get_market(self, market_id: str) -> Any:
+        """Get market details (cached).
+        
+        Args:
+            market_id: Market ID to fetch.
+            
+        Returns:
+            Market object from turbine_client.
+        """
+        if market_id not in self._market_cache:
+            # Fetch all markets and cache them
+            markets = self._rest_client.get_markets()
+            for m in markets:
+                self._market_cache[m.id] = m
+        
+        if market_id not in self._market_cache:
+            raise ValueError(f"Market {market_id} not found")
+        
+        return self._market_cache[market_id]
