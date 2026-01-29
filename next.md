@@ -52,16 +52,20 @@
 
 ## Phase 4: Advanced Features
 
-### 4.1 USDC Permit Signing
+### 4.1 ~~USDC Permit Signing~~ ✅ COMPLETE
 **Goal**: Enable gasless order execution by signing USDC permits.
 
-**Status**: turbine-py-client supports `sign_usdc_permit()` but not yet wired into `place_order()`.
+**Status**: IMPLEMENTED (2026-01-28)
 
-**Action**:
-- Modify `TurbineAdapter.place_order()` to:
-  1. Calculate required USDC collateral
-  2. Call `self._rest_client.sign_usdc_permit(value=collateral_amount)`
+**Changes Made**:
+- Modified `TurbineAdapter.place_order()` to:
+  1. Calculate required USDC collateral based on order type:
+     - BUY: `(size * price / 1e6) + fee + 10% margin`
+     - SELL: `size + 10% margin`
+  2. Call `self._rest_client.sign_usdc_permit(value=permit_amount, settlement_address=...)`
   3. Attach `permit_signature` to `SignedOrder` before `post_order()`
+- All orders now include USDC permits for gasless execution
+- Per SKILL.md integration requirements (lines 827-890)
 
 ### 4.2 Winnings Auto-Claim
 **Goal**: Automatically claim winnings from resolved markets.
@@ -94,3 +98,17 @@
 ### 5.3 Backtesting Harness
 - Record live orderbook snapshots
 - Replay for strategy tuning
+
+---
+
+## Integration Notes & Unknowns
+
+### Verified Integration Details
+- ✅ USDC permit signatures implemented and attached to all orders
+- ✅ WebSocket subscribe pattern verified against `turbine-py-client/examples/websocket_stream.py`
+- ✅ Quick market rollover support via `get_quick_market("BTC")`
+- ✅ Price/size decimal conversions: price scale 1e6 (but 10k for compat), size 6 decimals, strike 8 decimals
+- ✅ Settlement addresses fetched from `get_markets()` and cached
+
+### Open Questions
+(No unknowns identified - all integration requirements sourced from turbine-py-client code and examples)

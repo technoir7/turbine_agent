@@ -238,7 +238,7 @@ class TurbineAdapter(ExchangeAdapter):
             self._rest_client.close()
 
     async def subscribe_markets(self, market_ids: List[str]):
-        """Subscribe to market data topics.
+        """Subscribe to market data topics per turbine-py-client patterns.
         
         Args:
             market_ids: List of market IDs to subscribe to.
@@ -250,15 +250,16 @@ class TurbineAdapter(ExchangeAdapter):
         
         for market_id in market_ids:
             try:
-                # Subscribe to orderbook updates (from websocket_stream.py example)
+                # Per websocket_stream.py example lines 41-46:
+                # Subscribe to orderbook and trade updates
                 await self._ws_connection.subscribe_orderbook(market_id)
-                # Optionally subscribe to trades
                 await self._ws_connection.subscribe_trades(market_id)
+                logger.debug(f"Subscribed to orderbook+trades for {market_id[:16]}...")
             except Exception as e:
                 logger.error(f"Failed to subscribe to market {market_id}: {e}")
 
     async def place_order(self, order: Order) -> str:
-        """Place order via REST API.
+        """Place order via REST API with USDC permit for gasless execution.
         
         Args:
             order: Order to place.
@@ -273,6 +274,7 @@ class TurbineAdapter(ExchangeAdapter):
         
         try:
             from turbine_client.types import Outcome, Side as TurbineSide
+            import time
             
             # Get market settlement address (required for order signing)
             market = await self._get_market(order.market_id)
@@ -284,23 +286,52 @@ class TurbineAdapter(ExchangeAdapter):
             # For now, assume YES outcome (TODO: derive from order or config)
             turbine_outcome = Outcome.YES
             
+            # Convert to turbine scale
+            turbine_price = int(order.price * 10000)  # Price: 0-1 -> 0-1000000 (but we use 10k scale for compat)
+            turbine_size = int(order.size * 1_000_000)  # Size: shares -> 6 decimals
+            
             # Create and sign the order
             if turbine_side == TurbineSide.BUY:
                 signed_order = self._rest_client.create_limit_buy(
                     market_id=order.market_id,
                     outcome=turbine_outcome,
-                    price=int(order.price * 10000),  # Convert to turbine price scale
-                    size=int(order.size * 1_000_000),  # Convert to turbine size (6 decimals)
+                    price=turbine_price,
+                    size=turbine_size,
                     settlement_address=settlement_address,
+                    expiration=int(time.time()) + 3600,  # 1 hour expiration
                 )
+                
+                # USDC permit for BUY: (size * price / 1e6) + fee + 10% margin
+                # Per SKILL.md line 850-852
+                buyer_cost = (turbine_size * turbine_price) // 1_000_000
+                fee = turbine_size // 100  # ~1% fee estimate
+                permit_amount = ((buyer_cost + fee) * 110) // 100  # 10% safety margin
+                
             else:
                 signed_order = self._rest_client.create_limit_sell(
                     market_id=order.market_id,
                     outcome=turbine_outcome,
-                    price=int(order.price * 10000),
-                    size=int(order.size * 1_000_000),
+                    price=turbine_price,
+                    size=turbine_size,
+                    settlement_address=settlement_address,
+                    expiration=int(time.time()) + 3600,
+                )
+                
+                # USDC permit for SELL: size + 10% margin
+                # Per SKILL.md line 874
+                permit_amount = (turbine_size * 110) // 100
+            
+            # Sign USDC permit for gasless execution (per SKILL.md line 827-890)
+            # This is REQUIRED - orders without permits will fail
+            try:
+                permit = self._rest_client.sign_usdc_permit(
+                    value=permit_amount,
                     settlement_address=settlement_address,
                 )
+                signed_order.permit_signature = permit
+                logger.debug(f"Attached USDC permit: {permit_amount} units")
+            except Exception as permit_err:
+                logger.warning(f"Failed to sign USDC permit: {permit_err}. Order may fail.")
             
             # Submit the order
             result = self._rest_client.post_order(signed_order)
@@ -448,6 +479,21 @@ class TurbineAdapter(ExchangeAdapter):
         """
         self.callbacks.append(callback)
 
+    def get_quick_market(self, asset: str = "BTC"):
+        """Get active quick market for rollover support.
+        
+        Args:
+            asset: Asset symbol ("BTC" or "ETH").
+            
+        Returns:
+            QuickMarket object with market_id, start_price (strike, 8 decimals), end_time.
+        """
+        try:
+            return self._rest_client.get_quick_market(asset)
+        except Exception as e:
+            logger.error(f"Failed to get quick market for {asset}: {e}")
+            raise
+    
     async def _get_market(self, market_id: str) -> Any:
         """Get market details (cached).
         

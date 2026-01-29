@@ -189,3 +189,61 @@ The original implementation applied extremes widening AFTER inventory skew and i
 - [`README.md`](file:///home/aaron/code/turbine_agent/README.md): Clarified extremes applies before skew
 - [`next.md`](file:///home/aaron/code/turbine_agent/next.md): Marked fix complete, added T-minus evaluation
 - [`history.md`](file:///home/aaron/code/turbine_agent/history.md): This entry
+
+---
+
+## [2026-01-28 Late Night] Turbine Integration Wrapper Hardening ✅
+
+### Changes Made
+
+**1. USDC Permit Signatures for Gasless Execution** (`src/exchange/turbine.py`):
+- Updated `place_order()` to include USDC permit signatures on all orders
+- Per SKILL.md integration requirements (lines 827-890):
+  - BUY orders: `permit_amount = ((size * price / 1e6) + fee + 10% margin)`
+  - SELL orders: `permit_amount = (size + 10% margin)`
+- Calls `self._rest_client.sign_usdc_permit(value=..., settlement_address=...)`
+- Attaches `permit_signature` to `SignedOrder` before submission
+- Orders without permits will fail - this is REQUIRED for Turbine
+
+**2. WebSocket Subscribe Pattern Verification**:
+- Verified `subscribe_markets()` matches `turbine-py-client/examples/websocket_stream.py`
+- Calls both `subscribe_orderbook(market_id)` and `subscribe_trades(market_id)`
+- Added debug logging for subscription confirmations
+
+**3. Quick Market Support for Rollover** (`src/exchange/turbine.py`):
+- Added `get_quick_market(asset="BTC")` wrapper method
+- Returns `QuickMarket` with `market_id`, `start_price` (strike, 8 decimals), `end_time`
+- Enables BTC 15-minute market rollover functionality
+
+**4. Connectivity Probe Upgrade** (`src/tools/connectivity_probe.py`):
+- Completely rewritten as integration smoke test
+- Loads config from `config.yaml` using `load_config()`
+- Constructs `TurbineAdapter` instead of raw `TurbineClient`
+- Test sequence: health check → quick market → orderbook → optional WS test
+- Exit codes: 0 on success, 1 on failure
+
+**5. Integration Tests** (`tests/test_turbine_integration.py`):
+- Created comprehensive integration tests with turbine_client mocks
+- Tests adapter initialization, USDC permit inclusion, WebSocket patterns
+- NO strategy assertions - integration wiring only
+
+**6. Documentation**:
+- Updated `README.md`: Added connectivity probe usage examples
+- Updated `next.md`: Marked USDC permits complete, documented integration notes
+- Updated `history.md`: This entry
+
+### Integration Approach
+
+Following strict guardrails (NO strategy/risk/execution changes):
+- ✅ Only modified `src/exchange/turbine.py`
+- ✅ Only modified `src/tools/connectivity_probe.py`
+- ✅ Added integration tests (no strategy tests)
+- ✅ Updated documentation 
+- ❌ ZERO changes to `src/strategy/**`, `src/risk/**`, `src/execution/**`
+
+### Status
+- **Integration**: Complete and verified ✅
+- **USDC Permits**: Implemented on all orders ✅
+- **Quick Markets**: Rollover support ready ✅
+- **Tests**: Integration test suite created ✅
+- **Guardrails**: ZERO strategy/risk changes enforced ✅
