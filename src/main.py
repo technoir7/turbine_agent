@@ -3,6 +3,11 @@ import logging
 import signal
 import sys
 import argparse
+from dotenv import load_dotenv
+
+# Load environment variables from .env file BEFORE importing other modules
+load_dotenv()
+
 from src.supervisor import Supervisor
 
 # Setup logging

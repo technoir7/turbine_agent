@@ -47,6 +47,11 @@ class TurbineAdapter(ExchangeAdapter):
         self._api_private_key = os.environ.get('TURBINE_API_PRIVATE_KEY') or \
                                os.environ.get('INTEGRATION_API_PRIVATE_KEY')
         
+        # Auto-register API credentials if we have private key but not API keys
+        # Per SKILL.md Step 3: Auto-registration on first run
+        if self._private_key and (not self._api_key_id or not self._api_private_key):
+            self._auto_register_api_credentials()
+        
         # Initialize REST client
         try:
             from turbine_client import TurbineClient
@@ -83,6 +88,86 @@ class TurbineAdapter(ExchangeAdapter):
         
         # Market cache for settlement addresses
         self._market_cache: Dict[str, Any] = {}
+    
+    def _auto_register_api_credentials(self):
+        """Auto-register API credentials if only private key is set.
+        
+        Per SKILL.md Step 3: The bot should automatically register for API 
+        credentials on first run and save them to the .env file.
+        """
+        import re
+        from pathlib import Path
+        
+        logger.info("TurbineAdapter: Auto-registering API credentials...")
+        
+        try:
+            from turbine_client import TurbineClient
+            
+            credentials = TurbineClient.request_api_credentials(
+                host=self._host,
+                private_key=self._private_key,
+            )
+            
+            self._api_key_id = credentials["api_key_id"]
+            self._api_private_key = credentials["api_private_key"]
+            
+            # Update environment so we can use them immediately
+            os.environ["TURBINE_API_KEY_ID"] = self._api_key_id
+            os.environ["TURBINE_API_PRIVATE_KEY"] = self._api_private_key
+            
+            logger.info(f"TurbineAdapter: API credentials registered (key_id: {self._api_key_id[:8]}...)")
+            
+            # Save to .env file
+            self._save_credentials_to_env()
+            
+        except Exception as e:
+            logger.error(f"TurbineAdapter: Failed to auto-register API credentials: {e}")
+            logger.warning("Trading will be disabled. You can manually set credentials in .env")
+    
+    def _save_credentials_to_env(self):
+        """Save API credentials to .env file for future runs."""
+        import re
+        from pathlib import Path
+        
+        # Find .env file (look in current directory first, then project root)
+        env_path = Path(".env")
+        if not env_path.exists():
+            env_path = Path(__file__).parent.parent.parent / ".env"
+        
+        if not env_path.exists():
+            logger.warning("TurbineAdapter: No .env file found, cannot save credentials")
+            return
+        
+        try:
+            content = env_path.read_text()
+            
+            # Update TURBINE_API_KEY_ID
+            if "TURBINE_API_KEY_ID=" in content:
+                content = re.sub(
+                    r'^TURBINE_API_KEY_ID=.*$',
+                    f'TURBINE_API_KEY_ID={self._api_key_id}',
+                    content,
+                    flags=re.MULTILINE
+                )
+            else:
+                content = content.rstrip() + f"\nTURBINE_API_KEY_ID={self._api_key_id}"
+            
+            # Update TURBINE_API_PRIVATE_KEY
+            if "TURBINE_API_PRIVATE_KEY=" in content:
+                content = re.sub(
+                    r'^TURBINE_API_PRIVATE_KEY=.*$',
+                    f'TURBINE_API_PRIVATE_KEY={self._api_private_key}',
+                    content,
+                    flags=re.MULTILINE
+                )
+            else:
+                content = content.rstrip() + f"\nTURBINE_API_PRIVATE_KEY={self._api_private_key}"
+            
+            env_path.write_text(content + "\n")
+            logger.info(f"TurbineAdapter: API credentials saved to {env_path}")
+            
+        except Exception as e:
+            logger.error(f"TurbineAdapter: Failed to save credentials to .env: {e}")
 
     def _require_auth(self):
         """Raise error if trading credentials are not configured."""
