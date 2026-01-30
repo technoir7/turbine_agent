@@ -283,10 +283,11 @@ class TurbineSpike:
                 market_id=self.market_id,
                 side=c_side,
                 price=price,
-                size=1.0, # Fixed size for now
-                status=OrderStatus.PENDING_ACK,
-                created_ts=time.time()
+                size=1.0 # Fixed size for now
             )
+            # manually set status/ts if needed, though defaults are usually fine or set elsewhere
+            o.status = OrderStatus.PENDING_ACK
+            o.created_ts = time.time()
             
             tx_id = await self.adapter.place_order(o)
             
@@ -324,9 +325,9 @@ class TurbineSpike:
                 market_id=self.market_id,
                 side=c_side,
                 price=order.price,
-                size=order.size,
-                exchange_order_id=order.exchange_id
+                size=order.size
             )
+            o.exchange_order_id = order.exchange_id
             
             await self.adapter.cancel_order(o)
             del self.state.open_orders[client_id]
