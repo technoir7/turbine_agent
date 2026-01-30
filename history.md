@@ -520,3 +520,9 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 2. **State Resync**: If `cancel_order` returns 404, `ExecutionEngine` triggers `_resync_state()` (fetching open orders from API and reconciling local map).
 3. **Web3 Dependency**: `TurbineAdapter` checks for `web3` availability. If missing, it disables gasless permit signing gracefully (single warning) instead of crashing or spamming.
 **Result**: Verified that strict freshness thresholds block trading actions. Verified 404 handling logic.
+
+### Update 2026-01-30: Fix NameError in Freshness Check
+**Issue**: `NameError: name 'time' is not defined` in `TurbineAdapter.get_last_message_age`.
+**Fix**: Added missing `import time` to `src/exchange/turbine.py`.
+**Improvement**: Wrapped freshness check in `ExecutionEngine` with `try...except` to fail closed (treat as stale) on errors instead of crashing the supervisor loop.
+**Verified**: Logs confirm no NameError, and gate functionality persists.

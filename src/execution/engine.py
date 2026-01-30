@@ -34,7 +34,18 @@ class ExecutionEngine:
     async def reconcile(self, market_id: str):
         # 0. Safety: Check Data Freshness
         # Check if feed is fresh (default 5s age)
-        if not self.adapter.is_feed_fresh(self.max_data_age):
+        try:
+            is_fresh = self.adapter.is_feed_fresh(self.max_data_age)
+        except Exception as e:
+             # Fail closed if check errors
+             is_fresh = False
+             now = time.time()
+             if now - self.last_stale_log_ts > 5.0:
+                 logger.error(f"Exec: Feed freshness check failed: {e}. Assuming stale.")
+                 self.last_stale_log_ts = now
+             return
+
+        if not is_fresh:
             now = time.time()
             if now - self.last_stale_log_ts > 5.0:
                 age = self.adapter.get_last_message_age()
