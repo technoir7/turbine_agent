@@ -88,6 +88,8 @@ class TurbineAdapter(ExchangeAdapter):
         self._ws_task = None
         self._ws_message_count = 0  # For debug logging
         self._ws_last_message_ts = None  # For heartbeat monitoring
+        self._active_subscriptions: Set[str] = set()
+        self._watchdog_task = None
         
         # Market cache for settlement addresses
         self._market_cache: Dict[str, Any] = {}
@@ -186,11 +188,38 @@ class TurbineAdapter(ExchangeAdapter):
         """Connect to WebSocket and start listening for updates."""
         try:
             from turbine_client import TurbineWSClient
-            
+            import websockets
+            from contextlib import asynccontextmanager
+            from typing import AsyncIterator
+            from turbine_client.ws.client import WSStream
+
+            # Define Robust Client with Keepalive (Monkeypatch/Subclass strategy)
+            class RobustTurbineWSClient(TurbineWSClient):
+                """Subclass to inject keepalive settings into websockets.connect."""
+                
+                @asynccontextmanager
+                async def connect(self) -> AsyncIterator[WSStream]:
+                    """Connect with ping_interval=20, ping_timeout=20."""
+                    try:
+                        # 20s ping interval, 20s timeout (total 40s tolerance)
+                        self._connection = await websockets.connect(
+                            self.url, 
+                            ping_interval=20, 
+                            ping_timeout=20
+                        )
+                        stream = WSStream(self._connection)
+                        yield stream
+                    finally:
+                        if self._connection:
+                            await self._connection.close()
+                            self._connection = None
+
             # Use ws:// variant of the host
             ws_url = self.config.get('exchange', {}).get('ws_url', self._host)
             
-            self._ws_client = TurbineWSClient(host=ws_url)
+            # Use our robust client
+            self._ws_client = RobustTurbineWSClient(host=ws_url)
+            
             # Log the ACTUAL URL that will be used (after wss:// conversion + /api/v1/stream)
             logger.info(f"TurbineAdapter: Connecting to WebSocket at {self._ws_client.url}")
             
@@ -202,6 +231,10 @@ class TurbineAdapter(ExchangeAdapter):
             
             # Start background task to process WS messages
             self._ws_task = asyncio.create_task(self._process_ws_messages())
+            
+            # Start watchdog task if not already running
+            if not self._watchdog_task or self._watchdog_task.done():
+                self._watchdog_task = asyncio.create_task(self._watchdog_loop())
             
             logger.info("TurbineAdapter: WebSocket connected")
         except Exception as e:
@@ -253,9 +286,119 @@ class TurbineAdapter(ExchangeAdapter):
                 close_info = f" (close code: {e.code}, reason: {e.reason})"
             logger.error(f"WebSocket message processor error: {e}{close_info}", exc_info=True)
 
+    async def _watchdog_loop(self):
+        """Monitor WebSocket health and reconnect if stalled."""
+        import time
+        logger.info("TurbineAdapter: Watchdog started")
+        
+        while True:
+            try:
+                await asyncio.sleep(5)  # Check every 5 seconds
+                
+                if not self._ws_connection:
+                    continue
+                    
+                # If we haven't received a message in > 20s, reconnect
+                # (Use a generous buffer, official client ping is maybe 20s?)
+                limit = 20.0
+                if self._ws_last_message_ts and (time.time() - self._ws_last_message_ts > limit):
+                    logger.warning(f"TurbineAdapter: WS stalled (last msg {time.time() - self._ws_last_message_ts:.1f}s ago). Reconnecting...")
+                    await self._reconnect()
+                    
+            except asyncio.CancelledError:
+                logger.info("TurbineAdapter: Watchdog cancelled")
+                break
+            except Exception as e:
+                logger.error(f"TurbineAdapter: Watchdog error: {e}")
+                
+    async def _reconnect(self):
+        """Reconnect to WebSocket and resubscribe."""
+        import random
+        
+        # 1. Close existing connection (internal cleanup)
+        # We don't call self.close() because that cancels the watchdog (us!)
+        logger.info("TurbineAdapter: Reconnecting...")
+        
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+                
+        if self._ws_context and self._ws_connection:
+            try:
+                await self._ws_context.__aexit__(None, None, None)
+            except Exception as e:
+                logger.error(f"Error closing stalled connection: {e}")
+        
+        self._ws_client = None
+        self._ws_context = None
+        self._ws_connection = None
+        
+        # 2. Backoff before reconnecting
+        await asyncio.sleep(1 + random.random())
+        
+        # 3. Connect again
+        try:
+            # Re-use logic from connect(), using RobustTurbineWSClient
+            from turbine_client import TurbineWSClient
+            import websockets
+            from contextlib import asynccontextmanager
+            from typing import AsyncIterator
+            from turbine_client.ws.client import WSStream
+
+            class RobustTurbineWSClient(TurbineWSClient):
+                @asynccontextmanager
+                async def connect(self) -> AsyncIterator[WSStream]:
+                    try:
+                        self._connection = await websockets.connect(
+                            self.url, 
+                            ping_interval=20, 
+                            ping_timeout=20
+                        )
+                        stream = WSStream(self._connection)
+                        yield stream
+                    finally:
+                        if self._connection:
+                            await self._connection.close()
+                            self._connection = None
+
+            ws_url = self.config.get('exchange', {}).get('ws_url', self._host)
+            self._ws_client = RobustTurbineWSClient(host=ws_url)
+            
+            self._ws_context = self._ws_client.connect()
+            self._ws_connection = await self._ws_context.__aenter__()
+            self._ws_task = asyncio.create_task(self._process_ws_messages())
+            
+            # Reset stats
+            import time
+            self._ws_last_message_ts = time.time() # Reset timer immediately to avoid loop
+            
+            logger.info("TurbineAdapter: Reconnected")
+            
+            # 4. Resubscribe
+            if self._active_subscriptions:
+                logger.info(f"TurbineAdapter: Resubscribing to {len(self._active_subscriptions)} markets...")
+                for market_id in self._active_subscriptions:
+                    await self._ws_connection.subscribe(market_id)
+                logger.info("TurbineAdapter: Resubscribed")
+                
+        except Exception as e:
+            logger.error(f"TurbineAdapter: Reconnect failed: {e}")
+            # Watchdog will try again next loop
+            
     async def close(self):
         """Clean shutdown."""
         logger.info("TurbineAdapter: Closing connections")
+        
+        # Cancel Watchdog
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
         
         # Cancel WS task
         if self._ws_task:
@@ -289,12 +432,12 @@ class TurbineAdapter(ExchangeAdapter):
         
         for market_id in market_ids:
             try:
-                # Per ws/client.py lines 37-99:
                 # subscribe() sends {"type": "subscribe", "marketId": market_id}
                 # This subscribes to ALL updates: orderbook, trades, order_cancelled
                 # subscribe_orderbook() and subscribe_trades() are just aliases that call subscribe()
                 # Calling both would subscribe twice to the same market, causing WS close
                 await self._ws_connection.subscribe(market_id)
+                self._active_subscriptions.add(market_id)  # Track for watchdog reconnect
                 logger.debug(f"Subscribed to {market_id[:16]}...")
             except Exception as e:
                 # Extract close code/reason if it's a WebSocket exception
