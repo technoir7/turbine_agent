@@ -63,7 +63,15 @@
 - Trigger rollover immediately on market change event
 - Fallback to polling if WS disconnects
 
-### 3.4 PnL Tracking & Metrics
+### 3.4 Feed Safety & Resync
+**Goal**: Safety gates for feed freshness and state consistency.
+
+**Status**: ✅ **COMPLETE** (2026-01-30)
+- ✅ Freshness Gate (max age 5s)
+- ✅ State Resync (on 404 cancel)
+- ✅ Web3 dependency handling
+
+### 3.5 PnL Tracking & Metrics
 **Goal**: Add real-time profit/loss monitoring.
 
 **Tasks**:

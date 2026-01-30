@@ -2,6 +2,7 @@ import logging
 import asyncio
 import time
 import uuid
+import os
 from typing import Dict, List
 from ..core.state import StateStore, Order
 from ..core.events import Side, OrderStatus
@@ -22,9 +23,25 @@ class ExecutionEngine:
         self.state = state
         self.risk = risk
         self.strategy = strategy
+        self.strategy = strategy
         self.order_size = 1.0 # Default fixed size for this demo
+        
+        # Safety Config
+        self.max_data_age = float(os.environ.get("TURBINE_MAX_DATA_AGE_S", 5.0))
+        self.last_stale_log_ts = 0.0
+        self.last_resync_ts = 0.0
 
     async def reconcile(self, market_id: str):
+        # 0. Safety: Check Data Freshness
+        # Check if feed is fresh (default 5s age)
+        if not self.adapter.is_feed_fresh(self.max_data_age):
+            now = time.time()
+            if now - self.last_stale_log_ts > 5.0:
+                age = self.adapter.get_last_message_age()
+                logger.warning(f"Exec: Stale feed (age {age:.1f}s > {self.max_data_age}s). Skipping trading actions.")
+                self.last_stale_log_ts = now
+            return
+
         # 1. Get Desired
         bid_p, ask_p = self.strategy.get_desired_quotes(market_id)
         
@@ -76,9 +93,50 @@ class ExecutionEngine:
                     logger.warning(f"Exec: Order {existing.client_order_id} 404, removing from state")
                     if existing.client_order_id in self.state.orders:
                         del self.state.orders[existing.client_order_id]
+                    # Trigger resync to be safe
+                    await self._trigger_resync()
                 else:
                     logger.error(f"Exec: Cancel failed: {e}")
             
+    async def _trigger_resync(self):
+        """Trigger state resynchronization (rate limited)."""
+        now = time.time()
+        if now - self.last_resync_ts < 10.0:
+            return
+        self.last_resync_ts = now
+        logger.info("Exec: Triggering state resync on 404 error...")
+        await self._resync_state()
+
+    async def _resync_state(self):
+        """Fetch open orders and reconcile local state."""
+        try:
+            remote_orders = await self.adapter.get_open_orders()
+            remote_map = {o.exchange_order_id: o for o in remote_orders if o.exchange_order_id}
+            
+            # 1. Remove locals that are gone from remote (and have exchange ID)
+            to_remove = []
+            for clid, order in self.state.orders.items():
+                if order.status == OrderStatus.OPEN and order.exchange_order_id:
+                     if order.exchange_order_id not in remote_map:
+                         to_remove.append(clid)
+            
+            for clid in to_remove:
+                logger.info(f"Exec: Resync removing stale order {clid}")
+                del self.state.orders[clid]
+                
+            # 2. Add remotes that are missing locally
+            # Map local orders by exchange ID for check
+            local_exch_map = {o.exchange_order_id: o for o in self.state.orders.values() if o.exchange_order_id}
+            
+            for exch_id, r_order in remote_map.items():
+                if exch_id not in local_exch_map:
+                    # Adopt it
+                    logger.info(f"Exec: Resync adopting order {exch_id}")
+                    self.state.orders[r_order.client_order_id] = r_order
+                    
+        except Exception as e:
+            logger.error(f"Exec: Resync failed: {e}")
+
     async def _place_new(self, market_id: str, side: Side, price: float):
         # Create Order Object
         clid = f"oid_{uuid.uuid4().hex[:8]}"

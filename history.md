@@ -512,3 +512,11 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 2. Hardened `TurbineAdapter.cancel_order` to guard against `None` ID.
 3. Added graceful 404 handling in `ExecutionEngine` to remove stale orders from state instead of crashing/looping.
 **Result**: Verified valid `exchange_order_id` in logs (`0x8102...`) and successful/graceful cancellation.
+
+### Update 2026-01-30: Safety Features (Freshness, Resync, Deps)
+**Issue**: Risk of trading on stale data, permanent state de-sync on 404s, and dependency warnings.
+**Fixes**:
+1. **Freshness Gate**: `ExecutionEngine` now checks `TurbineAdapter.is_feed_fresh()` before trading. Default `TURBINE_MAX_DATA_AGE_S=5`.
+2. **State Resync**: If `cancel_order` returns 404, `ExecutionEngine` triggers `_resync_state()` (fetching open orders from API and reconciling local map).
+3. **Web3 Dependency**: `TurbineAdapter` checks for `web3` availability. If missing, it disables gasless permit signing gracefully (single warning) instead of crashing or spamming.
+**Result**: Verified that strict freshness thresholds block trading actions. Verified 404 handling logic.

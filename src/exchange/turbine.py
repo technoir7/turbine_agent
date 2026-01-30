@@ -241,6 +241,18 @@ class TurbineAdapter(ExchangeAdapter):
             logger.error(f"TurbineAdapter: Failed to connect WebSocket: {e}")
             raise
 
+    def get_last_message_age(self) -> float:
+        """Get time in seconds since last WebSocket message."""
+        if not self._ws_last_message_ts:
+            return float('inf')
+        # If last_ts is None, return inf. If set, diff.
+        # But wait, self._ws_last_message_ts is float or None.
+        return time.time() - self._ws_last_message_ts
+
+    def is_feed_fresh(self, max_age_seconds: float) -> bool:
+        """Check if WebSocket feed is fresh."""
+        return self.get_last_message_age() <= max_age_seconds
+
     async def _process_ws_messages(self):
         """Background task to process incoming WebSocket messages."""
         import time
@@ -577,15 +589,29 @@ class TurbineAdapter(ExchangeAdapter):
             
             # Sign USDC permit for gasless execution (per SKILL.md line 827-890)
             # This is REQUIRED - orders without permits will fail
-            try:
-                permit = self._rest_client.sign_usdc_permit(
-                    value=permit_amount,
-                    settlement_address=settlement_address,
-                )
-                signed_order.permit_signature = permit
-                logger.debug(f"Attached USDC permit: {permit_amount} units")
-            except Exception as permit_err:
-                logger.warning(f"Failed to sign USDC permit: {permit_err}. Order may fail.")
+            # BUT we gate it on web3 availability to valid crash loops
+            if not hasattr(self, '_can_sign_permit'):
+                try:
+                    import web3
+                    self._can_sign_permit = True
+                except ImportError:
+                    logger.warning("TurbineAdapter: 'web3' module not found. USDC permit signing disabled. Gasless trading may fail.")
+                    self._can_sign_permit = False
+            
+            if getattr(self, '_can_sign_permit', False):
+                try:
+                    permit = self._rest_client.sign_usdc_permit(
+                        value=permit_amount,
+                        settlement_address=settlement_address,
+                    )
+                    signed_order.permit_signature = permit
+                    logger.debug(f"Attached USDC permit: {permit_amount} units")
+                except Exception as permit_err:
+                    logger.warning(f"Failed to sign USDC permit: {permit_err}. Order may fail.")
+            elif not hasattr(self, '_warned_permit_disabled'):
+                 # Log only once per run if disabled
+                 logger.warning("Skipping USDC permit (signing disabled). Order might fail.")
+                 self._warned_permit_disabled = True
             
             # Submit the order
             result = self._rest_client.post_order(signed_order)
