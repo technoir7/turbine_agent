@@ -21,7 +21,25 @@
 
 **Consideration**: Evaluate whether to implement T-minus logic or rely on rollover + extremes control.
 
-### 3.1 Spread Optimization
+### 3.1 Event Translation Layer (IMMEDIATE)
+**Goal**: Connect WebSocket messages to state updates.
+
+**Status**: **REQUIRED** - WebSocket receives messages but supervisor ignores them
+
+**Current State** (2026-01-30):
+- ✅ WebSocket connects successfully
+- ✅ Messages received and logged (subscribe confirmations, orderbook updates)
+- ❌ Messages not applied to state (event type mismatch)
+
+**Implementation**:
+- In `TurbineAdapter._process_ws_messages()`, parse `WSMessage` objects BEFORE dispatching:
+  - `type="orderbook"` + `data` → Create `BookDeltaEvent` from orderbook snapshot
+  - `type="trade"` + `data` → Create `TradeEvent` with fill details
+  - Use exact field mappings from official client's `WSMessage` types
+- Only then dispatch translated events to supervisor callbacks
+- No invented fields - mirror official client exactly
+
+### 3.2 Spread Optimization
 **Goal**: Find profitable spread settings for BTC quick markets.
 
 **Tasks**:
@@ -30,20 +48,21 @@
 - Adjust `base_spread` based on market volatility
 - Test extremes widening effectiveness
 
-### 3.2 WebSocket Instant Rollover
+### 3.3 WebSocket Instant Rollover
 **Goal**: Reduce rollover latency from 10s polling to instant detection.
 
-**Status**: ~~Blocked by WebSocket subscription issues~~ → **UNBLOCKED** (2026- 01-29)
-- WebSocket subscription now working correctly после context manager fix
-- Ready to implement `subscribe_quick_markets("BTC")`
+**Status**: ~~Blocked by WebSocket subscription issues~~ → **PARTIALLY UNBLOCKED** (2026-01-30)
+- WebSocket subscription working correctly
+- Message reception confirmed
+- Ready to implement instant rollover
 
 **Implementation**:
-- Add `subscribe_quick_markets("BTC")` in Supervisor startup (need to verify this method exists or use equivalent)
-- Listen for `quick_market` WS message type
+- Subscribe to `quick_market` message type (check if exists in official client)
+- Listen for market change events in `_process_ws_messages()`
 - Trigger rollover immediately on market change event
 - Fallback to polling if WS disconnects
 
-### 3.3 PnL Tracking & Metrics
+### 3.4 PnL Tracking & Metrics
 **Goal**: Add real-time profit/loss monitoring.
 
 **Tasks**:
@@ -108,7 +127,9 @@
 ## Integration Notes & Unknowns
 
 ### Verified Integration Details
-- ✅ WebSocket connection and subscription working correctly (fixed 2026-01-29)
+- ✅ WebSocket connection working correctly (fixed 2026-01-29)
+- ✅ WebSocket message reception verified (fixed 2026-01-30) - receives subscribe confirmations and orderbook updates
+- ⚠️ Event translation layer needed - messages arrive but not applied to state yet
 - ✅ USDC permit signatures implemented and attached to all orders
 - ✅ WebSocket subscribe pattern verified against `turbine-py-client/examples/websocket_stream.py`
 - ✅ Quick market rollover support via `get_quick_market("BTC")`
@@ -116,4 +137,5 @@
 - ✅ Settlement addresses fetched from `get_markets()` and cached
 
 ### Open Questions
-(No unknowns identified - all integration requirements sourced from turbine-py-client code and examples)
+- Need to implement event translation layer to connect WS messages to state updates
+- Quick market instant rollover: verify if `subscribe_quick_markets()` method exists or need alternative

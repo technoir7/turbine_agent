@@ -308,3 +308,92 @@ source .venv/bin/activate && python -m src.main
 
 ### Files Modified
 - [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Fixed connection/subscription/cleanup logic
+
+---
+
+## [2026-01-30] WebSocket Message Reception and Debug Logging ✅
+
+### Issue Identified
+Bot connected to WebSocket and subscribed successfully, but appeared to receive no messages:
+- No orderbook updates being logged
+- No trade updates visible
+- Only REST polling was working
+
+**Root Cause**:
+1. **No logging in receive loop** - The `_process_ws_messages()` loop existed but had NO logging, so we couldn't tell if messages were arriving
+2. **URL logging confusion** - Logged `https://api.turbinefi.com` but actual URL was `wss://api.turbinefi.com/api/v1/stream` (TurbineWSClient auto-converts)
+3. **Event type mismatch** (discovered but not fixed yet) - WebSocket sends `WSMessage` objects but supervisor expects `BookDeltaEvent`/`TradeEvent`, causing silent ignoring of messages
+
+### Changes Made
+
+**File: [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py)**
+
+**1. Fixed WebSocket URL Logging** (line 192):
+- Log actual wss:// URL from `self._ws_client.url` instead of input parameter
+- Now shows: `wss://api.turbinefi.com/api/v1/stream`
+
+**2. Added Message Tracking** (lines 88-89):
+- `self._ws_message_count = 0` - Count total messages received
+- `self._ws_last_message_ts = None` - Track last message timestamp for heartbeat monitoring
+
+**3. Enhanced Receive Loop** (lines 211-256):
+- Added debug logging for first 10 messages (truncated to 500 chars)
+- Log message type and market_id for all messages at DEBUG level
+- Update message counter and timestamp on each message
+- Improved error handling with full stack traces
+- Extract and log WebSocket close codes/reasons
+
+**File: [`src/supervisor.py`](file:///home/aaron/code/turbine_agent/src/supervisor.py)**
+
+**4. Added Heartbeat Logging** (lines 100-137):
+- Every 15 seconds, log WebSocket feed health
+- Shows: total messages received, seconds since last message
+- Format: `WS Feed: {count} msgs, last msg {age}s ago`
+
+**File: [`src/tools/ws_stream_probe.py`](file:///home/aaron/code/turbine_agent/src/tools/ws_stream_probe.py)** (NEW)
+
+**5. Created WS Stream Verification Tool**:
+- Fetches BTC quick market via REST
+- Connects to WebSocket
+- Subscribes to market  
+- Waits up to 10 seconds for ONE message
+- Exits 0 on success, 1 on timeout/failure
+
+### Verification
+
+**ws_stream_probe test**:
+```bash
+$ python -m src.tools.ws_stream_probe
+✅ RECEIVED MESSAGE: type=subscribe, market_id=0x768...
+✅ SUCCESS: WebSocket is receiving messages
+```
+
+**Main bot test**:
+```
+TurbineAdapter: Connecting to WebSocket at wss://api.turbinefi.com/api/v1/stream
+TurbineAdapter: WebSocket connected
+TurbineAdapter: Subscribing to 1 markets
+TurbineAdapter: WS message #1: WSMessage(type='subscribe', ...)
+TurbineAdapter: WS message #2: OrderBookUpdate(type='orderbook', ...)
+TurbineAdapter: WS message #3: OrderBookUpdate(type='orderbook', ...)
+...continuous updates...
+```
+
+### Results
+- ✅ WebSocket messages now visible in logs
+- ✅ Receive loop confirmed working (logging first 10 messages)
+- ✅ Bot receives subscribe confirmations and orderbook updates continuously
+- ✅ Heartbeat logging ready for monitoring feed health
+- ✅ Verification tool confirms <1s message reception
+
+### Outstanding Work
+**Event Translation Layer** (deferred to follow-up):
+- WebSocket sends `WSMessage` with `.type`, `.market_id`, `.data`
+- Supervisor expects `BookDeltaEvent`, `TradeEvent`, etc.
+- Currently messages arrive but supervisor callbacks silently ignore them
+- Need to add translation layer in adapter before dispatching to callbacks
+
+### Files Modified
+- [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Added debug logging and message tracking
+- [`src/supervisor.py`](file:///home/aaron/code/turbine_agent/src/supervisor.py): Added WebSocket feed heartbeat logging
+- [`src/tools/ws_stream_probe.py`](file:///home/aaron/code/turbine_agent/src/tools/ws_stream_probe.py): NEW - WebSocket verification tool
