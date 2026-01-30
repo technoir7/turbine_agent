@@ -117,6 +117,9 @@ class ExecutionEngine:
                     # Trigger resync to be safe
                     await self._trigger_resync()
                 else:
+                    if "Stale feed" in str(e):
+                         logger.debug(f"Exec: Cancel blocked by adapter stale check: {e}")
+                         return
                     logger.error(f"Exec: Cancel failed: {e}")
             
     async def _trigger_resync(self):
@@ -188,6 +191,12 @@ class ExecutionEngine:
                  order.exchange_order_id = tx_id
                  logger.info(f"Exec: Order placed with ID {tx_id}")
         except Exception as e:
+             if "Stale feed" in str(e):
+                 # Log at DEBUG to avoid spam
+                 logger.debug(f"Exec: Place blocked by adapter stale check: {e}")
+                 if clid in self.state.orders:
+                     del self.state.orders[clid]
+                 return
              logger.error("Exec: Place failed: %s", e)
              # Remove from local state if failed immediate
              if clid in self.state.orders:

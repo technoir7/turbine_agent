@@ -497,6 +497,21 @@ class TurbineAdapter(ExchangeAdapter):
         # Close REST client
         if self._rest_client:
             self._rest_client.close()
+    def _check_fresh_or_raise(self, action: str):
+        """Raise RuntimeError if feed is stale.
+        
+        Args:
+            action: Description of action being attempted (e.g., "Place Order").
+        """
+        # Ensure max_age is consistent with execution engine (default 30s)
+        max_age = float(os.environ.get("TURBINE_MAX_DATA_AGE_S", 30.0))
+        
+        if not self.is_feed_fresh(max_age):
+            age = self.get_last_message_age()
+            msg = f"Stale feed (age {age:.1f}s > {max_age}s). Blocking {action}."
+            # We raise RuntimeError to stop execution immediately.
+            # Caller can handle logging.
+            raise RuntimeError(msg)
 
     async def subscribe_markets(self, market_ids: List[str]):
         """Subscribe to market data topics per turbine-py-client patterns.
@@ -538,6 +553,7 @@ class TurbineAdapter(ExchangeAdapter):
             NotImplementedError: If authentication is not configured.
         """
         self._require_auth()
+        self._check_fresh_or_raise("place_order")
         
         try:
             from turbine_client.types import Outcome, Side as TurbineSide
@@ -632,6 +648,7 @@ class TurbineAdapter(ExchangeAdapter):
             order: Order to cancel (must have exchange_order_id set).
         """
         self._require_auth()
+        self._check_fresh_or_raise("cancel_order")
         
         try:
             from turbine_client.types import Side as TurbineSide
@@ -664,7 +681,9 @@ class TurbineAdapter(ExchangeAdapter):
         Args:
             market_id: Optional market ID to restrict cancellation to.
         """
+
         self._require_auth()
+        self._check_fresh_or_raise("cancel_all")
         
         logger.info(f"TurbineAdapter: cancel_all triggered for market {market_id}")
         

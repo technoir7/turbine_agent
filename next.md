@@ -67,7 +67,8 @@
 **Goal**: Safety gates for feed freshness and state consistency.
 
 **Status**: ✅ **COMPLETE** (2026-01-30)
-- ✅ Freshness Gate (max age 5s)
+- ✅ Freshness Gate (max age 30s)
+- ✅ Adapter-Level Firewall (blocks network calls if stale)
 - ✅ State Resync (on 404 cancel)
 - ✅ Web3 dependency handling
 
