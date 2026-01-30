@@ -1,11 +1,49 @@
-# ⚡# Turbine Trading Bot
-> **Stable Spike Bot Available**: For a safer, single-file implementation, see [spike_bot.py](spike_bot.py).
-> usage: `python spike_bot.py` (Default: Dry Run). Set `TRADING_ENABLED=true` to trade.
-
-# Turbine Trading Agent
+# ⚡ Turbine Trading Agent
 ### *Autonomous Market-Making for Prediction Markets*
 
-Welcome to the **Turbine Trading Agent**, a high-performance, autonomous trading system engineered for prediction market Central Limit Order Books (CLOBs). Designed with a "Safety-First" philosophy, this agent provides liquidity while managing inventory risk through sophisticated skewing and imbalance detection.
+> [!TIP]
+> **Recommended for Stability**: [spike_bot.py](spike_bot.py) is a single-file implementation that consolidates the complex multi-module architecture into a deterministic, safety-first loop. It is less prone to race conditions and easier to audit.
+
+---
+
+## 🧩 Spike Bot (Single-File Implementation)
+
+The `spike_bot.py` script is designed for maximum reliability and ease of use. It reuses the hardened `TurbineAdapter` while keeping all trading logic in one place.
+
+### Features
+- **Deterministic Loop**: Connect -> Subscribe -> (Poll -> Calc -> Check -> Trade) -> Sleep.
+- **Strict Safety**: Fails closed if the WebSocket feed is stale (>30s) or inventory limits are reached.
+- **Probe Mode**: Verify connectivity and data flow without placing any orders.
+
+### Usage
+
+1. **Connectivity Probe (Safe)**:
+   ```bash
+   python spike_bot.py --probe
+   ```
+   *Runs for 30s, logs WebSocket messages, and exits. Never trades.*
+
+2. **Dry Run (Log Only)**:
+   ```bash
+   python spike_bot.py
+   ```
+   *Full strategy simulation. Logs intended actions but does not call the placement API.*
+
+3. **Live Trading**:
+   ```bash
+   TRADING_ENABLED=true python spike_bot.py
+   ```
+
+### Configuration
+- **DRY_RUN**: `true` (default) | `false`
+- **TRADING_ENABLED**: `false` (default) | `true`
+- **TURBINE_MAX_DATA_AGE_S**: `30.0` (default)
+
+---
+
+## 🏗️ Multi-Module Architecture
+The legacy multi-module system provides a more granular event-driven model.
+
 
 ---
 
