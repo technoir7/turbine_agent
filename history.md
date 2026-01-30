@@ -420,3 +420,41 @@ TurbineAdapter: WS message #3: OrderBookUpdate(type='orderbook', ...)
 ### Files Modified
 - [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Gated debug logs
 - [`src/tools/ws_stream_probe.py`](file:///home/aaron/code/turbine_agent/src/tools/ws_stream_probe.py): Added regression tool
+
+---
+
+## [2026-01-30 Late Night] WebSocket Reliability Hardening ✅
+
+### Issue Identified
+WebSocket connection would stall (stop receiving messages) after the initial subscribe ACK and snapshot, with no error raised. The process remained alive but effectively deaf.
+- Confirmed with `src/tools/ws_stream_probe.py` which failed with "Stall detected" after 10s.
+
+### Root Cause
+Likely missing or insufficient keepalive configuration in the underlying `websockets` connection combined with a server behavior that drops silent clients or stops sending data without updates.
+Unlike the official client usage, our long-running bot requires robust keepalive and reconnection logic.
+
+### Changes Made
+
+**1. Robust Keepalive (Ping/Pong)**:
+- Implemented `RobustTurbineWSClient` subclass in `src/exchange/turbine.py`.
+- Injects `ping_interval=20, ping_timeout=20` into `websockets.connect`.
+- This ensures `websockets` sends PING frames and drops the connection if PONG is missing.
+
+**2. Application-Level Watchdog**:
+- Added `_watchdog_loop` to `TurbineAdapter` that checks `last_message_ts` every 5s.
+- If no message for >20s, it forces a reconnect sequence.
+
+**3. Auto-Reconnect & Resubscribe**:
+- Implemented `_reconnect()` which:
+  1. Cancels existing tasks/connections.
+  2. Creates new `RobustTurbineWSClient`.
+  3. Resubscribes to all previously active markets.
+- Self-healing confirmed in logs: `WS stalled... Reconnecting... Resubscribed`.
+
+### Verification
+- `ws_stream_probe.py` (updated to use Robust client) passed with continuous messages (>40 in 30s).
+- `main.py` verified to detect stall at 24s and recover automatically, resuming message flow.
+
+### Files Modified
+- [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Added RobustClient, Watchdog, Reconnect
+- [`src/tools/ws_stream_probe.py`](file:///home/aaron/code/turbine_agent/src/tools/ws_stream_probe.py): Updated to use RobustClient
