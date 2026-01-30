@@ -98,6 +98,8 @@ class Supervisor:
     async def loop(self):
         """Main trading loop."""
         tick_interval = self.config['loop']['tick_interval_ms'] / 1000.0
+        heartbeat_interval = 15.0  # Log WS feed health every 15 seconds
+        last_heartbeat = time.time()
         
         while self.running:
             start_time = time.time()
@@ -125,10 +127,21 @@ class Supervisor:
                     
                     logger.info(f"ROLLOVER COMPLETE: Now trading {self.market_id}")
                 
-                # 2. State Maintenance (pruning, etc)
-                # 3. Risk Checks (Periodic)
+                # 2. Periodic WebSocket feed health check
+                if time.time() - last_heartbeat >= heartbeat_interval:
+                    ws_last_ts = getattr(self.adapter, '_ws_last_message_ts', None)
+                    ws_msg_count = getattr(self.adapter, '_ws_message_count', 0)
+                    if ws_last_ts:
+                        age = time.time() - ws_last_ts
+                        logger.info(f"WS Feed: {ws_msg_count} msgs, last msg {age:.1f}s ago")
+                    else:
+                        logger.warning("WS Feed: No messages received yet")
+                    last_heartbeat = time.time()
                 
-                # 4. Reconcile
+                # 3. State Maintenance (pruning, etc)
+                # 4. Risk Checks (Periodic)
+                
+                # 5. Reconcile
                 if hasattr(self, 'execution'):
                     await self.execution.reconcile(self.market_id)
             

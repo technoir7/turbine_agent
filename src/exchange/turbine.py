@@ -86,6 +86,8 @@ class TurbineAdapter(ExchangeAdapter):
         self._ws_context = None
         self._ws_connection = None
         self._ws_task = None
+        self._ws_message_count = 0  # For debug logging
+        self._ws_last_message_ts = None  # For heartbeat monitoring
         
         # Market cache for settlement addresses
         self._market_cache: Dict[str, Any] = {}
@@ -188,8 +190,9 @@ class TurbineAdapter(ExchangeAdapter):
             # Use ws:// variant of the host
             ws_url = self.config.get('exchange', {}).get('ws_url', self._host)
             
-            logger.info(f"TurbineAdapter: Connecting to WebSocket at {ws_url}")
             self._ws_client = TurbineWSClient(host=ws_url)
+            # Log the ACTUAL URL that will be used (after wss:// conversion + /api/v1/stream)
+            logger.info(f"TurbineAdapter: Connecting to WebSocket at {self._ws_client.url}")
             
             # Per official websocket_stream.py example (line 40):
             # Use async with to properly manage the connection context
@@ -206,19 +209,49 @@ class TurbineAdapter(ExchangeAdapter):
             raise
 
     async def _process_ws_messages(self):
-        """Background task to process incoming WebSocket messages."""
+        """Background task to process incoming WebSocket messages.
+        
+        Per official client ws/client.py:148-161, the WSStream.__aiter__() handles:
+        - Iterating over raw websocket messages
+        - Decoding bytes to UTF-8
+        - Parsing JSON (possibly multiple newline-delimited objects per message)
+        - Yielding WSMessage objects
+        
+        We receive parsed WSMessage objects with .type, .market_id, .data attributes.
+        """
+        import time
         try:
             async for message in self._ws_connection:
+                self._ws_message_count += 1
+                self._ws_last_message_ts = time.time()
+                
+                # Debug: Log first 10 messages in full (truncated)
+                if self._ws_message_count <= 10:
+                    msg_str = str(message)[:500]
+                    logger.info(f"TurbineAdapter: WS message #{self._ws_message_count}: {msg_str}")
+                
+                # Log message type for all messages
+                msg_type = getattr(message, 'type', 'unknown')
+                market_id = getattr(message, 'market_id', 'unknown')
+                logger.debug(f"TurbineAdapter: WS {msg_type} for {market_id[:16] if market_id != 'unknown' else market_id}...")
+                
                 # Dispatch to registered callbacks
+                # NOTE: Supervisor expects BookDeltaEvent/TradeEvent but we're sending WSMessage
+                # This will be fixed in a follow-up - for now just confirm messages are arriving
                 for callback in self.callbacks:
                     try:
                         await callback(message)
                     except Exception as e:
-                        logger.error(f"Callback error: {e}")
+                        logger.error(f"Callback error: {e}", exc_info=True)
+                        
         except asyncio.CancelledError:
             logger.info("WebSocket message processor cancelled")
         except Exception as e:
-            logger.error(f"WebSocket message processor error: {e}")
+            # Extract close code/reason if available
+            close_info = ""
+            if hasattr(e, 'code') and hasattr(e, 'reason'):
+                close_info = f" (close code: {e.code}, reason: {e.reason})"
+            logger.error(f"WebSocket message processor error: {e}{close_info}", exc_info=True)
 
     async def close(self):
         """Clean shutdown."""
