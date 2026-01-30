@@ -536,3 +536,11 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 **Verified**:
 - **Stale Mode**: Running with `MAX_AGE=0.001s` resulted in 0 placed orders and periodic warnings.
 - **Normal Mode**: Running with defaults confirmed trading resumes normally.
+
+### Update 2026-01-30: Robust Adapter-Level Safety Gating
+**Issue**: Needed to ensure stale feed gating cannot be bypassed by execution logic or bugs.
+**Fix**:
+1. **Firewall in Adapter**: Implemented `TurbineAdapter._check_fresh_or_raise()`.
+2. **Guarded Methods**: `place_order`, `cancel_order`, and `cancel_all` call this firewall immediately. If feed is stale, they raise `RuntimeError` and block the network call.
+3. **Graceful Handling**: `ExecutionEngine` catches these specific stale feed errors and logs them as DEBUG (to avoid spam) without crashing, treating it as a "skip" for that tick.
+**Verified**: Running with `MAX_AGE=0.001s` (simulated stale) resulted in ZERO HTTP requests and clean logs. Normal trading confirmed unaffected.
