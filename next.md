@@ -129,6 +129,7 @@
 ### Verified Integration Details
 - ✅ WebSocket connection working correctly (fixed 2026-01-29)
 - ✅ WebSocket message reception verified (fixed 2026-01-30) - receives subscribe confirmations and orderbook updates
+- ✅ WebSocket logging productionized (gated behind `TURBINE_WS_DEBUG`)
 - ⚠️ Event translation layer needed - messages arrive but not applied to state yet
 - ✅ USDC permit signatures implemented and attached to all orders
 - ✅ WebSocket subscribe pattern verified against `turbine-py-client/examples/websocket_stream.py`

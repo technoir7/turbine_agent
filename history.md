@@ -397,3 +397,26 @@ TurbineAdapter: WS message #3: OrderBookUpdate(type='orderbook', ...)
 - [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Added debug logging and message tracking
 - [`src/supervisor.py`](file:///home/aaron/code/turbine_agent/src/supervisor.py): Added WebSocket feed heartbeat logging
 - [`src/tools/ws_stream_probe.py`](file:///home/aaron/code/turbine_agent/src/tools/ws_stream_probe.py): NEW - WebSocket verification tool
+
+---
+
+## [2026-01-30 Evening] WebSocket Productionization ✅
+
+### Changes Made
+
+**1. Log Noise Reduction**:
+- Gated per-message debug logging in `src/exchange/turbine.py` behind `TURBINE_WS_DEBUG` environment variable.
+- Default behavior is now clean (heartbeat only), with detailed logs available for debugging.
+
+**2. Robustness Improvements**:
+- Verified `ws_stream_probe.py` as a regression testing tool (connects, subscribes, waits for 1 message, exits 0/1).
+- Confirmed receive loop handles exceptions gracefully without crashing the bot.
+
+**3. Verification**:
+- `connectivity_probe` passed (API health, REST endpoints).
+- `ws_stream_probe` passed (WebSocket subscription & message reception).
+- Main bot verified to run without log spam, showing only essential heartbeat metrics.
+
+### Files Modified
+- [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Gated debug logs
+- [`src/tools/ws_stream_probe.py`](file:///home/aaron/code/turbine_agent/src/tools/ws_stream_probe.py): Added regression tool
