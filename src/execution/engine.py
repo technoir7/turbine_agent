@@ -68,9 +68,16 @@ class ExecutionEngine:
             logger.info("Exec: Replacing %s (Drift %.4f or Age %.1f)", existing.client_order_id, drift, age)
             # Cancel then Place (simple reshape)
             # Ideally atomic replace if supported, but here separate
-            await self.adapter.cancel_order(existing)
-            # We don't wait for ack here in this loop, next tick will place new
-            # Or we can fire place task immediately. Safer to wait for cancel ack in next tick.
+            try:
+                await self.adapter.cancel_order(existing)
+            except Exception as e:
+                # Handle 404 gracefully (order already gone)
+                if "404" in str(e):
+                    logger.warning(f"Exec: Order {existing.client_order_id} 404, removing from state")
+                    if existing.client_order_id in self.state.orders:
+                        del self.state.orders[existing.client_order_id]
+                else:
+                    logger.error(f"Exec: Cancel failed: {e}")
             
     async def _place_new(self, market_id: str, side: Side, price: float):
         # Create Order Object
@@ -93,7 +100,10 @@ class ExecutionEngine:
         self.state.orders[clid] = order
         
         try:
-             await self.adapter.place_order(order)
+             tx_id = await self.adapter.place_order(order)
+             if tx_id:
+                 order.exchange_order_id = tx_id
+                 logger.info(f"Exec: Order placed with ID {tx_id}")
         except Exception as e:
              logger.error("Exec: Place failed: %s", e)
              # Remove from local state if failed immediate

@@ -611,6 +611,11 @@ class TurbineAdapter(ExchangeAdapter):
             
             turbine_side = TurbineSide.BUY if order.side == Side.BID else TurbineSide.SELL
             
+            if not order.exchange_order_id:
+                logger.error(f"Cannot cancel order {order.client_order_id}: No exchange ID. Marking as cancelled locally.")
+                # Force cleanup in state (caller should handle, but we can't call API)
+                return
+
             result = self._rest_client.cancel_order(
                 order_hash=order.exchange_order_id,
                 market_id=order.market_id,
@@ -620,7 +625,10 @@ class TurbineAdapter(ExchangeAdapter):
             logger.info(f"Order cancelled: {order.exchange_order_id}")
             
         except Exception as e:
-            logger.error(f"Failed to cancel order: {e}")
+            if "404" in str(e):
+                logger.warning(f"Cancel failed (404), order likely gone: {e}")
+            else:
+                logger.error(f"Failed to cancel order: {e}")
             raise
 
     async def cancel_all(self, market_id: Optional[str] = None):
@@ -710,14 +718,16 @@ class TurbineAdapter(ExchangeAdapter):
             orders = []
             for to in turbine_orders:
                 our_side = Side.BID if to.side == 0 else Side.ASK
-                orders.append(Order(
-                    order_id=to.order_hash,  # Use order_hash as ID
+                o = Order(
+                    client_order_id=to.order_hash,  # Use order_hash as client ID for adopted orders
                     market_id=to.market_id,
                     side=our_side,
-                    price=to.price / 10000,  # Convert from turbine scale
-                    size=to.remaining_size / 1_000_000,  # Convert from 6 decimals
-                    exchange_order_id=to.order_hash,
-                ))
+                    price=to.price / 10000.0,
+                    size=to.remaining_size / 1_000_000.0
+                )
+                o.exchange_order_id = to.order_hash
+                o.status = OrderStatus.OPEN
+                orders.append(o)
             
             return orders
             

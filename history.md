@@ -500,3 +500,15 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 **Root Cause**: `src/core/state.py`'s `OrderBook.apply_delta` used `if seq <= self.last_seq: return` to reject stale updates. Since `OrderBookUpdate` messages contain multiple delta entries (bids/asks) sharing the *same* sequence number (timestamp), the strict `<=` check caused all entries after the first one in the batch to be rejected.
 **Fix**: Changed check to `if seq < self.last_seq: return`. This allows multiple updates with the same sequence number (atomic batch processing) while still rejecting older stale messages.
 **Result**: Internal OrderBook now correctly populates with full depth (both Bids and Asks). `Supervisor` logs confirm `bids=25 asks=24`.
+
+### Update 2026-01-30: Order Tracking & Cancel Crash Fix
+**Issue**: Bot crashed with `AttributeError` or `404 Not Found` when attempting to cancel orders.
+**Root Cause**: 
+1. `ExecutionEngine` ignored the return value of `place_order` (the exchange ID), so internal records had `order_id=None`.
+2. `TurbineAdapter.cancel_order` blindly called API with `None` ID.
+3. 404 errors (order already gone) caused `ExecutionEngine` to crash on unhandled exception.
+**Fix**:
+1. Updated `ExecutionEngine` to store `exchange_order_id` returned by `place_order`.
+2. Hardened `TurbineAdapter.cancel_order` to guard against `None` ID.
+3. Added graceful 404 handling in `ExecutionEngine` to remove stale orders from state instead of crashing/looping.
+**Result**: Verified valid `exchange_order_id` in logs (`0x8102...`) and successful/graceful cancellation.
