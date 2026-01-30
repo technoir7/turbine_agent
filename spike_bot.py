@@ -284,7 +284,7 @@ class TurbineSpike:
                 side=c_side,
                 price=price,
                 size=1.0, # Fixed size for now
-                status=OrderStatus.PENDING_NEW,
+                status=OrderStatus.PENDING_ACK,
                 created_ts=time.time()
             )
             
