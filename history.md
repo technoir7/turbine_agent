@@ -526,3 +526,13 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 **Fix**: Added missing `import time` to `src/exchange/turbine.py`.
 **Improvement**: Wrapped freshness check in `ExecutionEngine` with `try...except` to fail closed (treat as stale) on errors instead of crashing the supervisor loop.
 **Verified**: Logs confirm no NameError, and gate functionality persists.
+
+### Update 2026-01-30: Enforced Strict Stale Feed Gating
+**Issue**: Previous stale-feed gate was permissive; trading action logs appeared despite stale warnings.
+**Fix**:
+1. **Centralized Gate**: Implemented `ExecutionEngine.is_trading_allowed()` which checks `TurbineAdapter.is_feed_fresh()`.
+2. **Strict Enforcement**: Guarded `reconcile`, `_place_new`, and `_converge_side` (cancels) with this gate. Absolutely no trading actions allowed if feed > 30s old.
+3. **Configuration**: Increased default `TURBINE_MAX_DATA_AGE_S` to 30.0s to avoid false positives during quiet markets.
+**Verified**:
+- **Stale Mode**: Running with `MAX_AGE=0.001s` resulted in 0 placed orders and periodic warnings.
+- **Normal Mode**: Running with defaults confirmed trading resumes normally.

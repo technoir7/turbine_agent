@@ -27,30 +27,36 @@ class ExecutionEngine:
         self.order_size = 1.0 # Default fixed size for this demo
         
         # Safety Config
-        self.max_data_age = float(os.environ.get("TURBINE_MAX_DATA_AGE_S", 5.0))
+        # Safety Config
+        self.max_data_age = float(os.environ.get("TURBINE_MAX_DATA_AGE_S", 30.0))
         self.last_stale_log_ts = 0.0
         self.last_resync_ts = 0.0
 
-    async def reconcile(self, market_id: str):
-        # 0. Safety: Check Data Freshness
-        # Check if feed is fresh (default 5s age)
+    def is_trading_allowed(self) -> bool:
+        """Centralized gate for trading actions."""
         try:
-            is_fresh = self.adapter.is_feed_fresh(self.max_data_age)
+             is_fresh = self.adapter.is_feed_fresh(self.max_data_age)
         except Exception as e:
              # Fail closed if check errors
-             is_fresh = False
              now = time.time()
-             if now - self.last_stale_log_ts > 5.0:
-                 logger.error(f"Exec: Feed freshness check failed: {e}. Assuming stale.")
-                 self.last_stale_log_ts = now
-             return
+             if now - self.last_stale_log_ts > 10.0:
+                  logger.error(f"Exec: Feed freshness check failed: {e}. Assuming stale.")
+                  self.last_stale_log_ts = now
+             return False
 
         if not is_fresh:
-            now = time.time()
-            if now - self.last_stale_log_ts > 5.0:
-                age = self.adapter.get_last_message_age()
-                logger.warning(f"Exec: Stale feed (age {age:.1f}s > {self.max_data_age}s). Skipping trading actions.")
-                self.last_stale_log_ts = now
+             now = time.time()
+             if now - self.last_stale_log_ts > 10.0:
+                  age = self.adapter.get_last_message_age()
+                  logger.warning(f"Exec: Stale feed (age {age:.1f}s > {self.max_data_age}s). Skipping trading actions.")
+                  self.last_stale_log_ts = now
+             return False
+        
+        return True
+
+    async def reconcile(self, market_id: str):
+        # 0. Safety: Check Data Freshness
+        if not self.is_trading_allowed():
             return
 
         # 1. Get Desired
@@ -73,6 +79,10 @@ class ExecutionEngine:
     async def _converge_side(self, market_id: str, side: Side, 
                              existing: Order, desired_price: float):
         
+        # Gate: Do not cancel/replace if stale
+        if not self.is_trading_allowed():
+             return
+
         # Condition A: We want no order, but have one -> Cancel
         if desired_price is None:
             if existing:
@@ -149,6 +159,10 @@ class ExecutionEngine:
             logger.error(f"Exec: Resync failed: {e}")
 
     async def _place_new(self, market_id: str, side: Side, price: float):
+        # Gate: Do not place if stale
+        if not self.is_trading_allowed():
+             return
+
         # Create Order Object
         clid = f"oid_{uuid.uuid4().hex[:8]}"
         order = Order(
