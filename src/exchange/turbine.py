@@ -83,6 +83,7 @@ class TurbineAdapter(ExchangeAdapter):
         
         # WebSocket client (lazy initialization)
         self._ws_client = None
+        self._ws_context = None
         self._ws_connection = None
         self._ws_task = None
         
@@ -184,12 +185,17 @@ class TurbineAdapter(ExchangeAdapter):
         try:
             from turbine_client import TurbineWSClient
             
-            # Use ws:// variant of the host (websocket_stream.py example)
+            # Use ws:// variant of the host
             ws_url = self.config.get('exchange', {}).get('ws_url', self._host)
             
             logger.info(f"TurbineAdapter: Connecting to WebSocket at {ws_url}")
             self._ws_client = TurbineWSClient(host=ws_url)
-            self._ws_connection = await self._ws_client.connect().__aenter__()
+            
+            # Per official websocket_stream.py example (line 40):
+            # Use async with to properly manage the connection context
+            # Store the context manager so we can clean it up later
+            self._ws_context = self._ws_client.connect()
+            self._ws_connection = await self._ws_context.__aenter__()
             
             # Start background task to process WS messages
             self._ws_task = asyncio.create_task(self._process_ws_messages())
@@ -226,10 +232,10 @@ class TurbineAdapter(ExchangeAdapter):
             except asyncio.CancelledError:
                 pass
         
-        # Close WS connection
-        if self._ws_connection:
+        # Close WS connection via context manager
+        if self._ws_context and self._ws_connection:
             try:
-                await self._ws_connection.__aexit__(None, None, None)
+                await self._ws_context.__aexit__(None, None, None)
             except Exception as e:
                 logger.error(f"Error closing WS connection: {e}")
         
@@ -250,13 +256,19 @@ class TurbineAdapter(ExchangeAdapter):
         
         for market_id in market_ids:
             try:
-                # Per websocket_stream.py example lines 41-46:
-                # Subscribe to orderbook and trade updates
-                await self._ws_connection.subscribe_orderbook(market_id)
-                await self._ws_connection.subscribe_trades(market_id)
-                logger.debug(f"Subscribed to orderbook+trades for {market_id[:16]}...")
+                # Per ws/client.py lines 37-99:
+                # subscribe() sends {"type": "subscribe", "marketId": market_id}
+                # This subscribes to ALL updates: orderbook, trades, order_cancelled
+                # subscribe_orderbook() and subscribe_trades() are just aliases that call subscribe()
+                # Calling both would subscribe twice to the same market, causing WS close
+                await self._ws_connection.subscribe(market_id)
+                logger.debug(f"Subscribed to {market_id[:16]}...")
             except Exception as e:
-                logger.error(f"Failed to subscribe to market {market_id}: {e}")
+                # Extract close code/reason if it's a WebSocket exception
+                close_info = ""
+                if hasattr(e, 'code') and hasattr(e, 'reason'):
+                    close_info = f" (close code: {e.code}, reason: {e.reason})"
+                logger.error(f"Failed to subscribe to market {market_id}: {e}{close_info}")
 
     async def place_order(self, order: Order) -> str:
         """Place order via REST API with USDC permit for gasless execution.

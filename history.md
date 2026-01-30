@@ -247,3 +247,64 @@ Following strict guardrails (NO strategy/risk/execution changes):
 - **Quick Markets**: Rollover support ready ✅
 - **Tests**: Integration test suite created ✅
 - **Guardrails**: ZERO strategy/risk changes enforced ✅
+
+---
+
+## [2026-01-29] WebSocket Subscription Fix ✅
+
+### Issue Identified
+The bot was failing to subscribe to markets with the error:
+```
+Failed to subscribe to market <market_id>: sent 1000 (OK); then received 1000 (OK)
+```
+
+**Root Cause Analysis**:
+1. **Incorrect context manager usage** in `src/exchange/turbine.py`:`connect()`:
+   - Manually called `__aenter__()` without storing the context manager
+   - Cleanup code tried to call `__aexit__()` on the WSStream object instead of the context manager
+   - This broke the WebSocket connection lifecycle
+
+2. **Secondary issue** (initial diagnosis): The adapter was calling both `subscribe_orderbook()` and `subscribe_trades()`, but per the official client (lines 37-99 of `turbine_client/ws/client.py`), both are aliases to `subscribe()`. While this created duplicate subscribe messages, the primary issue was the context manager.
+
+### Changes Made
+
+**File Modified**: [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py)
+
+**1. Fixed `connect()` method (lines 182-205)**:
+- Store context manager in `self._ws_context = self._ws_client.connect()`
+- Then call `await self._ws_context.__aenter__()` to get WSStream
+- Added detailed comment explaining the proper pattern per official example
+
+**2. Fixed `close()` method (lines 222-243)**:
+- Changed from calling `__aexit__()` on WSStream to calling it on the context manager
+- Check both `self._ws_context` and `self._ws_connection` before cleanup
+
+**3. Fixed `subscribe_markets()` method (lines 246-265)**:
+- Changed from calling both `subscribe_orderbook()` and `subscribe_trades()` to calling `subscribe()` once
+- Added comment explaining that `subscribe()` gets ALL updates (orderbook, trades, order_cancelled)
+- Improved error logging to extract and display WebSocket close codes/reasons
+
+**4. Added initialization** (line 86):
+- Initialize `self._ws_context = None` in `__init__()`
+
+### Verification
+Tested by running the bot:
+```bash
+source .venv/bin/activate && python -m src.main
+```
+
+**Results**:
+- ✅ WebSocket connected successfully
+- ✅ Subscribed to BTC quick market without errors
+- ✅ No "sent 1000 (OK); then received 1000 (OK)" errors
+- ✅ Bot runs continuously without WebSocket disconnects
+- ✅ Clean shutdown with proper context manager cleanup
+
+### Impact
+- WebSocket subscription now works correctly
+- Bot can receive real-time orderbook and trade updates
+- Proper connection lifecycle management (no leaked connections)
+- Better error logging for debugging WebSocket issues
+
+### Files Modified
+- [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Fixed connection/subscription/cleanup logic

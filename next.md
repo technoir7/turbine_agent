@@ -33,8 +33,12 @@
 ### 3.2 WebSocket Instant Rollover
 **Goal**: Reduce rollover latency from 10s polling to instant detection.
 
+**Status**: ~~Blocked by WebSocket subscription issues~~ → **UNBLOCKED** (2026- 01-29)
+- WebSocket subscription now working correctly после context manager fix
+- Ready to implement `subscribe_quick_markets("BTC")`
+
 **Implementation**:
-- Add `subscribe_quick_markets("BTC")` in Supervisor startup
+- Add `subscribe_quick_markets("BTC")` in Supervisor startup (need to verify this method exists or use equivalent)
 - Listen for `quick_market` WS message type
 - Trigger rollover immediately on market change event
 - Fallback to polling if WS disconnects
@@ -104,6 +108,7 @@
 ## Integration Notes & Unknowns
 
 ### Verified Integration Details
+- ✅ WebSocket connection and subscription working correctly (fixed 2026-01-29)
 - ✅ USDC permit signatures implemented and attached to all orders
 - ✅ WebSocket subscribe pattern verified against `turbine-py-client/examples/websocket_stream.py`
 - ✅ Quick market rollover support via `get_quick_market("BTC")`
