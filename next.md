@@ -24,12 +24,12 @@
 ### 3.1 Event Translation Layer (IMMEDIATE)
 **Goal**: Connect WebSocket messages to state updates.
 
-**Status**: **REQUIRED** - WebSocket receives messages but supervisor ignores them
+**Status**: ✅ **COMPLETE** (2026-01-30)
 
 **Current State** (2026-01-30):
 - ✅ WebSocket connects successfully
-- ✅ Messages received and logged (subscribe confirmations, orderbook updates)
-- ❌ Messages not applied to state (event type mismatch)
+- ✅ Messages received and logged
+- ✅ Messages translated and applied to state (verified via Supervisor logs)
 
 **Implementation**:
 - In `TurbineAdapter._process_ws_messages()`, parse `WSMessage` objects BEFORE dispatching:
@@ -51,9 +51,10 @@
 ### 3.3 WebSocket Instant Rollover
 **Goal**: Reduce rollover latency from 10s polling to instant detection.
 
-**Status**: ~~Blocked by WebSocket subscription issues~~ → **PARTIALLY UNBLOCKED** (2026-01-30)
+**Status**: **UNBLOCKED** (2026-01-30)
 - WebSocket subscription working correctly
 - Message reception confirmed
+- Event translation layer active
 - Ready to implement instant rollover
 
 **Implementation**:

@@ -242,17 +242,10 @@ class TurbineAdapter(ExchangeAdapter):
             raise
 
     async def _process_ws_messages(self):
-        """Background task to process incoming WebSocket messages.
-        
-        Per official client ws/client.py:148-161, the WSStream.__aiter__() handles:
-        - Iterating over raw websocket messages
-        - Decoding bytes to UTF-8
-        - Parsing JSON (possibly multiple newline-delimited objects per message)
-        - Yielding WSMessage objects
-        
-        We receive parsed WSMessage objects with .type, .market_id, .data attributes.
-        """
+        """Background task to process incoming WebSocket messages."""
         import time
+        from ..core.events import BookDeltaEvent, TradeEvent, Side as InternalSide
+        
         try:
             async for message in self._ws_connection:
                 self._ws_message_count += 1
@@ -263,19 +256,22 @@ class TurbineAdapter(ExchangeAdapter):
                     msg_str = str(message)[:500]
                     logger.info(f"TurbineAdapter: WS message #{self._ws_message_count}: {msg_str}")
                 
-                # Log message type for all messages at DEBUG level (usually hidden)
+                # Log message type for all messages at DEBUG level
                 msg_type = getattr(message, 'type', 'unknown')
                 market_id = getattr(message, 'market_id', 'unknown')
-                logger.debug(f"TurbineAdapter: WS {msg_type} for {market_id[:16] if market_id != 'unknown' else market_id}...")
+                display_id = str(market_id) if market_id else 'None'
+                logger.debug(f"TurbineAdapter: WS {msg_type} for {display_id[:16]}...")
+                
+                # TRANSLATION LAYER: Convert WSMessage to Internal Events
+                internal_events = self._translate_to_internal_events(message)
                 
                 # Dispatch to registered callbacks
-                # NOTE: Supervisor expects BookDeltaEvent/TradeEvent but we're sending WSMessage
-                # This will be fixed in a follow-up - for now just confirm messages are arriving
-                for callback in self.callbacks:
-                    try:
-                        await callback(message)
-                    except Exception as e:
-                        logger.error(f"Callback error: {e}", exc_info=True)
+                for event in internal_events:
+                    for callback in self.callbacks:
+                        try:
+                            await callback(event)
+                        except Exception as e:
+                            logger.error(f"Callback error processing {event.__class__.__name__}: {e}", exc_info=True)
                         
         except asyncio.CancelledError:
             logger.info("WebSocket message processor cancelled")
@@ -286,10 +282,73 @@ class TurbineAdapter(ExchangeAdapter):
                 close_info = f" (close code: {e.code}, reason: {e.reason})"
             logger.error(f"WebSocket message processor error: {e}{close_info}", exc_info=True)
 
+    def _translate_to_internal_events(self, message) -> list:
+        """Translate raw WSMessage to internal events (BookDelta, Trade)."""
+        from ..core.events import BookDeltaEvent, TradeEvent, Side as InternalSide
+        import time
+        
+        events = []
+        msg_type = getattr(message, 'type', '')
+        data = getattr(message, 'data', {})
+        market_id = getattr(message, 'market_id', None)
+        
+        if not market_id or not data:
+            return events
+
+        # Scale factor for Turbine (6 decimals usually, check docs carefully or config)
+        # Using 1e6 as standard for this exchange based on previous knowledge
+        SCALE = 1_000_000.0
+
+        if msg_type == 'orderbook':
+            # Data structure: {'bids': [{'price': int, 'size': int}], 'asks': [...], 'lastUpdate': int}
+            last_update = data.get('lastUpdate', int(time.time() * 1000))
+            
+            # Map Bids (Side 0 -> InternalSide.BID)
+            for bid in data.get('bids', []):
+                events.append(BookDeltaEvent(
+                    seq=last_update,  # Using timestamp as substitute for sequence
+                    market_id=market_id,
+                    side=InternalSide.BID,
+                    price=float(bid['price']) / SCALE,
+                    size=float(bid['size']) / SCALE
+                ))
+                
+            # Map Asks (Side 1 -> InternalSide.ASK)
+            for ask in data.get('asks', []):
+                events.append(BookDeltaEvent(
+                    seq=last_update,
+                    market_id=market_id,
+                    side=InternalSide.ASK,
+                    price=float(ask['price']) / SCALE,
+                    size=float(ask['size']) / SCALE
+                ))
+                
+        elif msg_type == 'trade':
+            # Data structure: {'price': int, 'size': int, 'side': int, 'timestamp': int, ...}
+            # Turbine Side: 0=BUY (Aggr Buyer -> Maker Seller?), 1=SELL
+            # TradeEvent needs aggressor_side.
+            # Usually 'side' in trade msg indicates the aggressor side.
+            raw_side = data.get('side')
+            aggressor = InternalSide.BID if raw_side == 0 else InternalSide.ASK
+            
+            events.append(TradeEvent(
+                ts=float(data.get('timestamp', 0)) / 1000.0,
+                market_id=market_id,
+                price=float(data.get('price', 0)) / SCALE,
+                size=float(data.get('size', 0)) / SCALE,
+                aggressor_side=aggressor
+            ))
+            
+        return events
+
     async def _watchdog_loop(self):
         """Monitor WebSocket health and reconnect if stalled."""
         import time
         logger.info("TurbineAdapter: Watchdog started")
+        
+        # Default 60s per user request.
+        stall_threshold = float(os.environ.get("TURBINE_WS_STALL_SECONDS", "60.0"))
+        logger.info(f"TurbineAdapter: Watchdog threshold set to {stall_threshold}s")
         
         while True:
             try:
@@ -298,9 +357,7 @@ class TurbineAdapter(ExchangeAdapter):
                 if not self._ws_connection:
                     continue
                     
-                # If we haven't received a message in > 20s, reconnect
-                # (Use a generous buffer, official client ping is maybe 20s?)
-                limit = 20.0
+                limit = stall_threshold
                 if self._ws_last_message_ts and (time.time() - self._ws_last_message_ts > limit):
                     logger.warning(f"TurbineAdapter: WS stalled (last msg {time.time() - self._ws_last_message_ts:.1f}s ago). Reconnecting...")
                     await self._reconnect()
@@ -310,6 +367,7 @@ class TurbineAdapter(ExchangeAdapter):
                 break
             except Exception as e:
                 logger.error(f"TurbineAdapter: Watchdog error: {e}")
+                await asyncio.sleep(5)
                 
     async def _reconnect(self):
         """Reconnect to WebSocket and resubscribe."""

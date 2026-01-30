@@ -455,6 +455,42 @@ Unlike the official client usage, our long-running bot requires robust keepalive
 - `ws_stream_probe.py` (updated to use Robust client) passed with continuous messages (>40 in 30s).
 - `main.py` verified to detect stall at 24s and recover automatically, resuming message flow.
 
-### Files Modified
-- [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Added RobustClient, Watchdog, Reconnect
 - [`src/tools/ws_stream_probe.py`](file:///home/aaron/code/turbine_agent/src/tools/ws_stream_probe.py): Updated to use RobustClient
+
+---
+
+## [2026-01-30 Late Night] Event Translation Layer Implementation ✅
+
+### Issue Identified
+The bot was successfully receiving WebSocket messages but the Strategy Engine remained blind to market data.
+- `TurbineAdapter` received `WSMessage` objects but `Supervisor` expected internal `BookDeltaEvent` / `TradeEvent` objects.
+- Attempting to inspect the orderbook result in "Book Empty".
+- `RolloverManager` would occasionally crash or fail to switch markets due to API `204 No Content` responses.
+
+### Changes Made
+
+**1. Event Translation Layer**:
+- Implemented `_translate_to_internal_events` in `TurbineAdapter`.
+- Converts raw `WSMessage` (OrderBookUpdate/Trade) into internal `BookDeltaEvent` and `TradeEvent`.
+- Applies correct scaling (price/1e6, size/1e6) and side mapping.
+- Handled `lastUpdate` timestamp as sequence number for `OrderBook` application.
+
+**2. Proof of Life Logging**:
+- Added periodic logging in `Supervisor` to print `MID`, `BID`, and `ASK` prices from the internal `StateStore`.
+- This confirms that data is not just received, but *applied* and *available* to the strategy.
+
+**3. Critical Fixes**:
+- **Logging Crash**: Fixed a `TypeError` when logging messages with `market_id=None`.
+- **Library Patch**: Patched `turbine_client/client.py`'s `get_quick_market` to safely handle `None` responses (204 No Content), preventing `RolloverManager` crashes.
+- **Configurable Watchdog**: Added `TURBINE_WS_STALL_SECONDS` to allow tuning stall detection threshold.
+
+### Verification
+- `main.py` logs confirmed successful data flow: `Supervisor: Market Data ... BID=0.71 (x19.27)`.
+- `ws_stream_probe.py` remains in steady state.
+- Rollover logic verified to switch market IDs correctly.
+
+### Files Modified
+- [`src/exchange/turbine.py`](file:///home/aaron/code/turbine_agent/src/exchange/turbine.py): Event translation, logging fix, watchdog config
+- [`src/supervisor.py`](file:///home/aaron/code/turbine_agent/src/supervisor.py): Proof of life logging
+- [`src/strategy/rollover.py`](file:///home/aaron/code/turbine_agent/src/strategy/rollover.py): Reviewed
+- [`turbine_client/client.py`](file:///home/aaron/code/turbine_agent/turbine-py-client/turbine_client/client.py): Patched `get_quick_market`

@@ -131,11 +131,31 @@ class Supervisor:
                 if time.time() - last_heartbeat >= heartbeat_interval:
                     ws_last_ts = getattr(self.adapter, '_ws_last_message_ts', None)
                     ws_msg_count = getattr(self.adapter, '_ws_message_count', 0)
+                    
+                    # Log WS Health
                     if ws_last_ts:
                         age = time.time() - ws_last_ts
                         logger.info(f"WS Feed: {ws_msg_count} msgs, last msg {age:.1f}s ago")
                     else:
                         logger.warning("WS Feed: No messages received yet")
+                        
+                    # PROOF OF LIFE: Log internal state (verifies translation layer)
+                    # This confirms the Strategy Engine is actually seeing the data
+                    book = self.state.get_orderbook(self.market_id)
+                    mid = book.get_mid()
+                    bb = book.get_best_bid()
+                    ba = book.get_best_ask()
+                    
+                    mid_str = f"{mid:.2f}" if mid else "None"
+                    bid_str = f"{bb[0]:.2f} (x{bb[1]:.2f})" if bb else "None"
+                    ask_str = f"{ba[0]:.2f} (x{ba[1]:.2f})" if ba else "None"
+                    
+                    if mid:
+                        logger.info(f"Supervisor: Market Data [{self.market_id[:8]}]: MID={mid_str} BID={bid_str} ASK={ask_str}")
+                    else:
+                        # Log detailed state even if retrieval failed or partial
+                        logger.warning(f"Supervisor: Market Data [{self.market_id[:8]}]: MID=None BID={bid_str} ASK={ask_str}")
+
                     last_heartbeat = time.time()
                 
                 # 3. State Maintenance (pruning, etc)
