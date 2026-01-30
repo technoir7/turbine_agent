@@ -21,6 +21,7 @@ import time
 import yaml
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
+from dotenv import load_dotenv
 
 # Reuse existing adapter
 from src.exchange.turbine import TurbineAdapter
@@ -83,6 +84,7 @@ class MarketState:
 # --- Core Bot Class ---
 class TurbineSpike:
     def __init__(self, config_path: str = "config.yaml"):
+        load_dotenv() # Load .env file
         self.config = self._load_config(config_path)
         self.state = MarketState()
         self.market_id = None
@@ -90,15 +92,23 @@ class TurbineSpike:
         self.running = True
         
         # Safety Flags
-        self.dry_run = os.environ.get("DRY_RUN", "true").lower() == "true"
         self.trading_enabled = os.environ.get("TRADING_ENABLED", "false").lower() == "true"
+        
+        # Default: Dry Run = True unless explicitly ENABLED
+        self.dry_run = not self.trading_enabled
+        
+        # Allow explicit override if needed (e.g. TRADING_ENABLED=true but DRY_RUN=true for logged test)
+        if os.environ.get("DRY_RUN", "").lower() == "true":
+             self.dry_run = True
+
         self.max_age = float(os.environ.get("TURBINE_MAX_DATA_AGE_S", 30.0))
         
-        if not self.trading_enabled:
-            logger.warning("TRADING DISABLED (Safe Mode). Set TRADING_ENABLED=true to trade.")
-            self.dry_run = True # Force dry run if not strictly enabled
+        if self.dry_run:
+            logger.warning("DRY RUN ACTIVE. No real orders will be placed.")
+        else:
+            logger.warning("⚠️  LIVE TRADING ENABLED ⚠️")
             
-        logger.info(f"Bot Initialized. DRY_RUN={self.dry_run}, MAX_AGE={self.max_age}s")
+        logger.info(f"Bot Initialized. MAX_AGE={self.max_age}s")
 
     def _load_config(self, path: str) -> Dict:
         try:
