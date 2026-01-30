@@ -225,12 +225,12 @@ class TurbineAdapter(ExchangeAdapter):
                 self._ws_message_count += 1
                 self._ws_last_message_ts = time.time()
                 
-                # Debug: Log first 10 messages in full (truncated)
-                if self._ws_message_count <= 10:
+                # Debug: Log messages if TURBINE_WS_DEBUG is set
+                if os.environ.get("TURBINE_WS_DEBUG"):
                     msg_str = str(message)[:500]
                     logger.info(f"TurbineAdapter: WS message #{self._ws_message_count}: {msg_str}")
                 
-                # Log message type for all messages
+                # Log message type for all messages at DEBUG level (usually hidden)
                 msg_type = getattr(message, 'type', 'unknown')
                 market_id = getattr(message, 'market_id', 'unknown')
                 logger.debug(f"TurbineAdapter: WS {msg_type} for {market_id[:16] if market_id != 'unknown' else market_id}...")
