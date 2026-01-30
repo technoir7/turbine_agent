@@ -1,4 +1,8 @@
-# ⚡ Turbine Trading Agent
+# ⚡# Turbine Trading Bot
+> **Stable Spike Bot Available**: For a safer, single-file implementation, see [spike_bot.py](spike_bot.py).
+> usage: `python spike_bot.py` (Default: Dry Run). Set `TRADING_ENABLED=true` to trade.
+
+# Turbine Trading Agent
 ### *Autonomous Market-Making for Prediction Markets*
 
 Welcome to the **Turbine Trading Agent**, a high-performance, autonomous trading system engineered for prediction market Central Limit Order Books (CLOBs). Designed with a "Safety-First" philosophy, this agent provides liquidity while managing inventory risk through sophisticated skewing and imbalance detection.

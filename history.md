@@ -554,3 +554,15 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 - `web3` imports successfully (no warnings).
 - Quotes placed at `0.40` (Bid) / `0.60` (Ask) - successfully placed and ID returned.
 - No immediate 404s observed in clean run.
+
+### Update 2026-01-30: Single-File Spike Bot
+**Objective**: reduce architecture complexity and ensuring strictly serial execution.
+**Action**: Created `spike_bot.py`.
+**Features**:
+- **Single Loop**: No race conditions between Strategy/Execution/Risk.
+- **Explicit State**: Single `MarketState` object.
+- **Safety**: Reuses hardened `TurbineAdapter` but manages logic in one file.
+- **Probe Mode**: Added `--probe` flag to verify connectivity without trading.
+**Verified**:
+- Probe mode connects, fetches market ID, and processes WS `BookDeltaEvent` messages correctly.
+- Dry Run mode logs intended actions without execution.

@@ -14,6 +14,13 @@
 
 ## Phase 3: Tuning & Optimization
 
+### 3.0 Spike Bot Evaluation
+**Goal**: Evaluate stability of the single-file `spike_bot.py` implementation.
+**Tasks**:
+- Run `spike_bot.py` in production for 24h.
+- Compare fill rates and error logs vs multi-module bot.
+- If successful, deprecate multi-module architecture or refactor into it.
+
 ### 3.0 Evaluate Expiry-Time (T-minus) Flattening Logic
 **Goal**: Determine if bot should reduce inventory and widen spreads as market approaches expiry.
 
