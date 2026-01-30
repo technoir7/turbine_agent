@@ -2,7 +2,7 @@
 
 exchange:
   base_url: "https://api.turbinefi.com"
-  ws_url: "https://api.turbinefi.com"
+  ws_url: "wss://api.turbinefi.com"
   chain_id: 137  # Polygon mainnet
   
   # Timeouts (seconds)
@@ -19,7 +19,7 @@ exchange:
 
 strategy:
   # Market Making
-  base_spread: 0.02
+  base_spread: 0.20
   min_price: 0.01
   max_price: 0.99
   

@@ -544,3 +544,13 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 2. **Guarded Methods**: `place_order`, `cancel_order`, and `cancel_all` call this firewall immediately. If feed is stale, they raise `RuntimeError` and block the network call.
 3. **Graceful Handling**: `ExecutionEngine` catches these specific stale feed errors and logs them as DEBUG (to avoid spam) without crashing, treating it as a "skip" for that tick.
 **Verified**: Running with `MAX_AGE=0.001s` (simulated stale) resulted in ZERO HTTP requests and clean logs. Normal trading confirmed unaffected.
+
+### Update 2026-01-30: Web3 Integration & Strategy Calibration
+**Issue**: Missing `web3` dependency disabled permit signing; adverse selection caused immediate fill/kills (404s).
+**Fix**:
+1. **Dependencies**: Added `web3>=6.0.0` and installed.
+2. **Strategy**: Widened `base_spread` to **0.20** (accounting for wide market 0.05-0.95).
+**Verified**:
+- `web3` imports successfully (no warnings).
+- Quotes placed at `0.40` (Bid) / `0.60` (Ask) - successfully placed and ID returned.
+- No immediate 404s observed in clean run.
