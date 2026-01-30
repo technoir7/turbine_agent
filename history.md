@@ -494,3 +494,9 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 - [`src/supervisor.py`](file:///home/aaron/code/turbine_agent/src/supervisor.py): Proof of life logging
 - [`src/strategy/rollover.py`](file:///home/aaron/code/turbine_agent/src/strategy/rollover.py): Reviewed
 - [`turbine_client/client.py`](file:///home/aaron/code/turbine_agent/turbine-py-client/turbine_client/client.py): Patched `get_quick_market`
+
+### Update 2026-01-30: OrderBook Sequence Bug Fix
+**Issue**: Despite translation layer working, the OrderBook often appeared empty or had only 1 bid and 0 asks.
+**Root Cause**: `src/core/state.py`'s `OrderBook.apply_delta` used `if seq <= self.last_seq: return` to reject stale updates. Since `OrderBookUpdate` messages contain multiple delta entries (bids/asks) sharing the *same* sequence number (timestamp), the strict `<=` check caused all entries after the first one in the batch to be rejected.
+**Fix**: Changed check to `if seq < self.last_seq: return`. This allows multiple updates with the same sequence number (atomic batch processing) while still rejecting older stale messages.
+**Result**: Internal OrderBook now correctly populates with full depth (both Bids and Asks). `Supervisor` logs confirm `bids=25 asks=24`.

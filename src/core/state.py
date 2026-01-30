@@ -12,8 +12,8 @@ class OrderBook:
         self.last_update_ts = 0.0
 
     def apply_delta(self, seq: int, side: Side, price: float, size: float):
-        if seq <= self.last_seq:
-            # Ignore stale or duplicate
+        if seq < self.last_seq:
+            # Ignore stale (but allow same sequence for batch updates)
             return
         if seq > self.last_seq + 1 and self.last_seq != 0:
             # Gap detected - in real impl, this raises exception/flag

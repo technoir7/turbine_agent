@@ -31,6 +31,7 @@ class Supervisor:
         self.risk: Optional[RiskEngine] = None
         self.execution: Optional[ExecutionEngine] = None
         self.rollover: Optional[RolloverManager] = None
+        self.last_proof_log_ts = 0.0
 
     async def start(self):
         """Startup sequence."""
@@ -179,6 +180,27 @@ class Supervisor:
             if isinstance(event, BookDeltaEvent):
                 book = self.state.get_orderbook(event.market_id)
                 book.apply_delta(event.seq, event.side, event.price, event.size)
+                
+                # Proof Logging (Rate Limited 5s)
+                now = time.time()
+                if now - self.last_proof_log_ts > 5.0 and event.market_id == self.market_id:
+                     mid = book.get_mid()
+                     bb = book.get_best_bid()
+                     ba = book.get_best_ask()
+                     
+                     bb_str = f"{bb[0]:.2f} (x{bb[1]:.2f})" if bb else "None"
+                     ba_str = f"{ba[0]:.2f} (x{ba[1]:.2f})" if ba else "None"
+                     mid_str = f"{mid:.2f}" if mid else "None"
+                     
+                     reasons = []
+                     if not bb: reasons.append("No Bids")
+                     if not ba: reasons.append("No Asks")
+                     reason = f" ({', '.join(reasons)})" if reasons else ""
+                     
+                     logger.info(f"Supervisor: Market Update [{event.market_id[:8]}]: "
+                                 f"MID={mid_str}{reason} BID={bb_str} ASK={ba_str} "
+                                 f"seq={book.last_seq} bids={len(book.bids)} asks={len(book.asks)}")
+                     self.last_proof_log_ts = now
                 
             elif isinstance(event, UserFillEvent):
                 logger.info(f"Fill: {event.side} {event.size} @ {event.price}")

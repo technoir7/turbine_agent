@@ -301,10 +301,18 @@ class TurbineAdapter(ExchangeAdapter):
 
         if msg_type == 'orderbook':
             # Data structure: {'bids': [{'price': int, 'size': int}], 'asks': [...], 'lastUpdate': int}
+            bids_data = data.get('bids', [])
+            asks_data = data.get('asks', [])
             last_update = data.get('lastUpdate', int(time.time() * 1000))
             
+            # Debug payload sizes - REMOVED
+            # if os.environ.get("TURBINE_WS_DEBUG"):
+            #      import logging
+            #      logger = logging.getLogger(__name__)
+            #      logger.info(f"Translating OrderBook: {market_id[:8]} bids={len(bids_data)} asks={len(asks_data)}")
+
             # Map Bids (Side 0 -> InternalSide.BID)
-            for bid in data.get('bids', []):
+            for bid in bids_data:
                 events.append(BookDeltaEvent(
                     seq=last_update,  # Using timestamp as substitute for sequence
                     market_id=market_id,
@@ -314,7 +322,7 @@ class TurbineAdapter(ExchangeAdapter):
                 ))
                 
             # Map Asks (Side 1 -> InternalSide.ASK)
-            for ask in data.get('asks', []):
+            for ask in asks_data:
                 events.append(BookDeltaEvent(
                     seq=last_update,
                     market_id=market_id,
