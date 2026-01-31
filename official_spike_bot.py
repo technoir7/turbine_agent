@@ -152,7 +152,9 @@ class MarketMakerBot:
         self.market_id: str | None = None
         self.settlement_address: str | None = None
         self.contract_address: str | None = None 
+        self.contract_address: str | None = None 
         self.start_price: int = 0
+        self.end_time: int = 0 # Unix TS
         
         # Strategy State
         self.state = MarketState()
@@ -187,29 +189,29 @@ class MarketMakerBot:
         for order_id in list(self.state.open_orders.keys()):
             try:
                 # We store order_hash as key
-                # We store order_hash as key
                 self.client.cancel_order(order_hash=order_id, market_id=market_id)
-                await asyncio.sleep(0.1) # Rate limit protect
                 await asyncio.sleep(0.1) # Rate limit protect
             except Exception as e:
                 logger.warning(f"Failed to cancel order {order_id}: {e}")
         self.state.open_orders.clear()
 
-    async def switch_to_new_market(self, new_market_id: str, start_price: int = 0) -> None:
-        """Switch liquidity to a new market."""
+    async def switch_to_new_market(self, new_market_id: str, start_price: int, end_time: int) -> None:
+        """Transition logic."""
         old_market_id = self.market_id
-
-        # Track for winnings
-        if old_market_id and self.contract_address:
-            self.traded_markets[old_market_id] = self.contract_address
-            logger.info(f"Tracking market {old_market_id[:8]}... for winnings claim")
 
         if old_market_id:
             logger.info(f"MARKET TRANSITION: {old_market_id[:8]} -> {new_market_id[:8]}")
+            # Track old for claiming
+            if self.contract_address:
+                self.traded_markets[old_market_id] = self.contract_address
+                logger.info(f"Tracking market {old_market_id[:8]}... for winnings claim")
+            
+            # Cancel all old orders
             await self.cancel_all_orders(old_market_id)
 
         self.market_id = new_market_id
         self.start_price = start_price
+        self.end_time = end_time
         self.state = MarketState() # Reset strategy state
 
         # Fetch addresses
@@ -234,7 +236,7 @@ class MarketMakerBot:
                 if res:
                     new_market_id, end_time, start_price = res
                     if new_market_id != self.market_id:
-                        await self.switch_to_new_market(new_market_id, start_price)
+                        await self.switch_to_new_market(new_market_id, start_price, end_time)
                 else:
                     # No active market found, wait and retry
                     pass
@@ -352,15 +354,37 @@ class MarketMakerBot:
         pos = self.state.position
         max_pos = CONFIG['risk']['max_inventory_units']
         
+        # TIME-BASED URGENCY
+        # Increase skew and restrict entry as we near end_time
+        time_left = self.end_time - time.time()
+        urgency_mult = 1.0
+        
         # Hard Limits (Stop quoting if full)
         allow_bid = True
         allow_ask = True
+        
+        if time_left < 30:
+            # T-30s: HARD STOP. Cancel everything, place nothing.
+            return None, None
+            
+        elif time_left < 120:
+            # T-2m: PANIC MODE. 
+            # 5x Skew to force inventory flush.
+            # Reduce Only: Don't increase absolute position size.
+            urgency_mult = 5.0
+            if pos > 0: allow_bid = False # Don't buy more
+            if pos < 0: allow_ask = False # Don't sell more
+            
+        elif time_left < 300:
+            # T-5m: URGENT. 2x Skew.
+            urgency_mult = 2.0
+        
         if pos >= max_pos:
             allow_bid = False
         if pos <= -max_pos:
             allow_ask = False
             
-        skew = -1 * (pos / max_pos) * strat['skew_factor']
+        skew = -1 * (pos / max_pos) * strat['skew_factor'] * urgency_mult
 
         # Quote
         bid_p = mid - base_half + skew
