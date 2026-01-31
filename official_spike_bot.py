@@ -166,8 +166,13 @@ class MarketMakerBot:
 
     async def get_active_market(self) -> Tuple[str, int, int]:
         """Get the currently active BTC quick market."""
-        quick_market = self.client.get_quick_market("BTC")
-        return quick_market.market_id, quick_market.end_time, quick_market.start_price
+        while True:
+            try:
+                quick_market = await asyncio.to_thread(self.client.get_quick_market, "BTC")
+                return quick_market.market_id, quick_market.end_time, quick_market.start_price
+            except Exception as e:
+                logger.error(f"Failed to fetch quick market: {e}. Retrying in 5s...")
+                await asyncio.sleep(5)
 
     async def cancel_all_orders(self, market_id: str) -> None:
         """Cancel all local active orders."""
