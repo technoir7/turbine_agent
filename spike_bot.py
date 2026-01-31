@@ -166,6 +166,9 @@ class TurbineSpike:
         """Fetch current position for active market."""
         try:
             positions = await self.adapter.get_positions()
+            # Debug Log: remove this once verified
+            if positions:
+                logger.info(f"DEBUG RAW POS: {positions} (Target: {self.market_id})")
             return positions.get(self.market_id, 0.0)
         except Exception as e:
             logger.error(f"Pos Fetch Error: {e}")
