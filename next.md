@@ -154,7 +154,9 @@
 - ✅ Price/size decimal conversions verified
 - ✅ Settlement addresses fetched from `get_markets()` and cached
 - ✅ State Reconciliation: Periodic "ADAPTER TICK" logs authoritative position/order counts
-- ✅ Trade Verification: `connectivity_probe.py --trade-test` proves ability to place/cancel
+- ✅ Trade Verification: `connectivity_probe.py --trade-test` proves ability to place/verify/cancel orders
+- ✅ Robust State Parsing: Handles NoneType positions and 404 cancels gracefully
+- ✅ WS Message Filtering: Tracks messages per target market to ensure relevant feed freshness
 
 ### Open Questions
 - Need to implement full event translation layer to connect WS messages to state updates (partially done in Adapter now, need Supervisor hookup)

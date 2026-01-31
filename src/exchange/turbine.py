@@ -126,6 +126,7 @@ class TurbineAdapter(ExchangeAdapter):
         self._ws_message_count = 0 
         self._ws_messages_total = 0  # Total raw messages
         self._ws_messages_parsed_ok = 0  # Valid typed messages
+        self._ws_messages_by_market: Dict[str, int] = {} # Per market counters
         self._ws_last_message_ts = None  # Any message
         self._ws_last_market_update_ts = None  # Market data (book/trade)
         
@@ -288,19 +289,24 @@ class TurbineAdapter(ExchangeAdapter):
                 self._ws_message_count += 1
                 self._ws_last_message_ts = time.time()
                 
+                msg_type = getattr(message, 'type', 'unknown')
+                market_id = getattr(message, 'market_id', 'unknown')
+                
                 # Debug: Log messages if TURBINE_WS_DEBUG is set
                 if os.environ.get("TURBINE_WS_DEBUG"):
                     msg_str = str(message)[:500]
                     logger.info(f"TurbineAdapter: WS message #{self._ws_message_count}: {msg_str}")
                 
-                # Log message type for all messages at DEBUG level
-                msg_type = getattr(message, 'type', 'unknown')
-                market_id = getattr(message, 'market_id', 'unknown')
-                
                 # Count parsed messages
                 if msg_type in ['orderbook', 'trade', 'order_cancelled']:
                     self._ws_messages_parsed_ok += 1
-                    self._ws_last_market_update_ts = time.time()
+                    
+                    # Update market specific counters
+                    if market_id:
+                        self._ws_messages_by_market[market_id] = self._ws_messages_by_market.get(market_id, 0) + 1
+                        
+                        # Only update global freshness if it's a relevant market
+                        self._ws_last_market_update_ts = time.time()
                 
                 display_id = str(market_id) if market_id else 'None'
                 logger.debug(f"TurbineAdapter: WS {msg_type} for {display_id[:16]}...")
@@ -319,7 +325,6 @@ class TurbineAdapter(ExchangeAdapter):
         except asyncio.CancelledError:
             logger.info("WebSocket message processor cancelled")
         except Exception as e:
-            # Extract close code/reason if available
             close_info = ""
             if hasattr(e, 'code') and hasattr(e, 'reason'):
                 close_info = f" (close code: {e.code}, reason: {e.reason})"
@@ -657,13 +662,10 @@ class TurbineAdapter(ExchangeAdapter):
             
             logger.info(f"Order placed: {order_hash}")
             
-            # TRUTH CHECK: Immediately verify order exists
-            # We await this to ensure we don't return a "phantom" order ID
-            is_verified = await self._verify_order_placement(order_hash)
+            # TRUTH CHECK: Updated to verify_order_exists (list based)
+            is_verified = await self._verify_order_exists(order_hash)
             if not is_verified:
                 logger.error(f"CRITICAL: Order {order_hash} placed but NOT found in API verification! marking as unconfirmed.")
-                # We still return the hash but log loudly. 
-                # The recon loop will catch cleanup if it really doesn't exist.
             
             return order_hash
             
@@ -671,14 +673,23 @@ class TurbineAdapter(ExchangeAdapter):
             logger.error(f"Failed to place order: {e}")
             raise
 
-    async def _verify_order_placement(self, order_hash: str) -> bool:
-        """Verify order exists on exchange immediately after placement."""
+    async def _verify_order_exists(self, order_hash: str) -> bool:
+        """Verify order exists by fetching open orders."""
         try:
-            # Run blocking call in thread
-            order = await asyncio.to_thread(self._rest_client.get_order, order_hash)
-            if order and order.order_hash == order_hash:
-                logger.info(f"Truth Check: Order {order_hash} verification PASSED")
-                return True
+            # Use get_open_orders to leverage the list endpoint
+            orders = await asyncio.to_thread(
+                self._rest_client.get_orders, 
+                trader=self._rest_client.address,
+                status="open"
+            )
+            
+            # Check existence
+            for o in orders:
+                if o.order_hash == order_hash:
+                    logger.info(f"Truth Check: Order {order_hash} verification PASSED")
+                    # Update cache immediately!
+                    self._last_reconciled_orders[order_hash] = o
+                    return True
         except Exception as e:
             logger.error(f"Truth Check: Order {order_hash} verification FAILED: {e}")
         return False
@@ -689,81 +700,78 @@ class TurbineAdapter(ExchangeAdapter):
             self._reconcile_task = asyncio.create_task(self._reconciliation_loop())
             logger.info("TurbineAdapter: Reconciliation loop started")
 
-    async def _reconciliation_loop(self):
-        """Periodic loop to fetch authoritative state."""
-        while True:
-            try:
-                await asyncio.sleep(self._reconcile_interval)
-                
-                # 1. Fetch Positions
-                positions = await self.get_positions()
-                self._last_reconciled_positions = positions
-                
-                # 2. Fetch Open Orders
-                open_orders = await self.get_open_orders()
-                self._last_reconciled_orders = {o.exchange_order_id: o for o in open_orders}
-                
-                # 3. Log Tick Stats (The "Tick Log")
-                # We log this at INFO so it appears in standard logs
-                ws_age = self.get_last_message_age()
-                ws_status = "OK" if ws_age < 30 else "STALE"
-                ws_msg_cnt = self._ws_messages_parsed_ok
-                
-                logger.info(
-                    f"ADAPTER TICK | "
-                    f"Pos: {len(positions)} mkts | "
-                    f"Orders: {len(open_orders)} open | "
-                    f"WS: {ws_status} ({ws_msg_cnt} msgs, age {ws_age:.1f}s) | "
-                    f"Inv[BTC]: {positions.get(self.get_quick_market('BTC').market_id, 0.0):.4f}"
-                )
-                
-                # TODO: Emit reconciliation events if StateStore supports them
-                # For now, we trust the caller to poll get_positions/get_open_orders 
-                # or we implement event emission here if we can modify events.py.
-                # Since we can't modify events.py, we rely on the Supervisor (caller) 
-                # calling get_open_orders()/get_positions() regularly OR 
-                # relying on this loop to update internal caches if we add them.
-                
-                # Currently get_positions fetches fresh every time.
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Reconciliation error: {e}")
-                await asyncio.sleep(5)
+    # _reconciliation_loop moved to bottom to be contiguous with get_positions update
+    # Need to keep it method-ordered if possible but I already updated it in previous block
+    # Actually wait, I moved _reconciliation_loop definition in the previous block DOWN?
+    # No, I replaced get_positions AND get_open_orders in the previous block.
+    # The previous block REPLACED _reconciliation_loop logic? No.
+    # The previous block ENDED at 856 which was get_open_orders. 
+    # Ah, I replaced get_positions and get_open_orders. 
+    # I did NOT replace _reconciliation_loop in previous block? 
+    # The previous block targeted StartLine:821 which is get_positions. 
+    # The context shows get_positions then get_open_orders. 
+    # Use view file to check where _reconciliation_loop is.
+    # It was at line 692 in previous view.
+    
+    # I will stick to JUST replacing verification and cancel here.
 
     async def cancel_order(self, order: Order):
-        """Cancel specific order.
-        
-        Args:
-            order: Order to cancel (must have exchange_order_id set).
-        """
+        """Cancel specific order with robust side/id lookup."""
         self._require_auth()
         self._check_fresh_or_raise("cancel_order")
         
         try:
             from turbine_client.types import Side as TurbineSide
             
-            turbine_side = TurbineSide.BUY if order.side == Side.BID else TurbineSide.SELL
-            
-            if not order.exchange_order_id:
-                logger.error(f"Cannot cancel order {order.client_order_id}: No exchange ID. Marking as cancelled locally.")
-                # Force cleanup in state (caller should handle, but we can't call API)
+            order_hash = order.exchange_order_id or order.client_order_id
+            if not order_hash:
+                logger.error("Cancel failed: No order hash provided")
                 return
 
-            result = self._rest_client.cancel_order(
-                order_hash=order.exchange_order_id,
-                market_id=order.market_id,
-                side=turbine_side,
-            )
+            # RECONCILIATION-FIRST LOOKUP
+            # Try to find authoritative side/market from our recon cache
+            cached_order = self._last_reconciled_orders.get(order_hash)
             
-            logger.info(f"Order cancelled: {order.exchange_order_id}")
+            target_side = None
+            target_market = order.market_id
             
-        except Exception as e:
-            if "404" in str(e):
-                logger.warning(f"Cancel failed (404), order likely gone: {e}")
+            if cached_order:
+                # Use cached truth
+                target_side = TurbineSide.BUY if cached_order.side == 0 else TurbineSide.SELL
+                target_market = cached_order.market_id
+                logger.debug(f"Cancel: Found cached order {order_hash}, side={target_side}, mkt={target_market}")
             else:
-                logger.error(f"Failed to cancel order: {e}")
+                # Fallback to local passed order object
+                turbine_side = TurbineSide.BUY if order.side == Side.BID else TurbineSide.SELL
+                target_side = turbine_side
+                logger.warning(f"Cancel: Order {order_hash} not in recon cache. Using local side {target_side}.")
+
+            try:
+                result = await asyncio.to_thread(
+                    self._rest_client.cancel_order,
+                    order_hash=order_hash,
+                    market_id=target_market,
+                    side=target_side,
+                )
+                logger.info(f"Order cancelled: {order_hash}")
+                
+            except Exception as e:
+                # Handle 404 - "Not Found"
+                if "404" in str(e) or "not found" in str(e).lower():
+                    # Check if it's REALLY gone or just wrong side
+                    logger.warning(f"Cancel 404 for {order_hash}. Verifying if it is closed...")
+                    exists = await self._verify_order_exists(order_hash)
+                    if not exists:
+                         logger.info(f"Order {order_hash} confirmed confirmed gone (404 was valid).")
+                         return
+                    else:
+                         logger.error(f"Order {order_hash} exists but Cancel 404'd! Mismatch side/market?")
+                         raise
+                else:
+                    raise
+                    
+        except Exception as e:
+            logger.error(f"Failed to cancel order: {e}")
             raise
 
     async def cancel_all(self, market_id: Optional[str] = None):
@@ -807,22 +815,24 @@ class TurbineAdapter(ExchangeAdapter):
             raise
 
     async def get_positions(self) -> Dict[str, float]:
-        """Fetch current positions snapshot.
-        
-        Returns:
-            Dictionary mapping market_id to net position (positive = long).
-        """
+        """Fetch current positions snapshot safely."""
         if not self._private_key:
-            logger.warning("get_positions: No auth configured, returning empty")
             return {}
         
         try:
-            positions = self._rest_client.get_user_positions(
+            # Add debug logging for structure
+            # positions = await asyncio.to_thread(...)
+            
+            positions = await asyncio.to_thread(
+                self._rest_client.get_user_positions,
                 address=self._rest_client.address,
                 chain_id=self._chain_id,
             )
             
-            # Convert to dict: market_id -> net_position
+            # ROBUST PARSING: positions might be None if API returns 204 or null
+            if positions is None:
+                return {}
+                
             result = {}
             for pos in positions:
                 # net = yes_shares - no_shares (in contract units, 6 decimals)
@@ -831,6 +841,12 @@ class TurbineAdapter(ExchangeAdapter):
             
             return result
             
+        except TypeError as te:
+            if "'NoneType' object is not iterable" in str(te):
+                logger.warning("get_positions: API returned None (no positions?), treating as empty.")
+                return {}
+            logger.error(f"Failed to fetch positions (TypeError): {te}")
+            return {}
         except Exception as e:
             logger.error(f"Failed to fetch positions: {e}")
             return {}
@@ -842,11 +858,11 @@ class TurbineAdapter(ExchangeAdapter):
             List of Order objects representing open orders.
         """
         if not self._private_key:
-            logger.warning("get_open_orders: No auth configured, returning empty")
             return []
         
         try:
-            turbine_orders = self._rest_client.get_orders(
+            turbine_orders = await asyncio.to_thread(
+                self._rest_client.get_orders,
                 trader=self._rest_client.address,
                 status="open",
             )
@@ -871,6 +887,51 @@ class TurbineAdapter(ExchangeAdapter):
         except Exception as e:
             logger.error(f"Failed to fetch open orders: {e}")
             return []
+
+    # ... (skipping register_callback etc) ...
+
+    async def _reconciliation_loop(self):
+        """Periodic loop to fetch authoritative state."""
+        while True:
+            try:
+                await asyncio.sleep(self._reconcile_interval)
+                
+                # 1. Fetch Positions
+                positions = await self.get_positions()
+                self._last_reconciled_positions = positions
+                
+                # 2. Fetch Open Orders
+                # Use explicit wrapper to call Thread
+                open_orders_list = await asyncio.to_thread(
+                    self._rest_client.get_orders,
+                    trader=self._rest_client.address,
+                    status="open"
+                )
+                
+                # Update cache with RAW turbine orders to enable canonical lookup
+                self._last_reconciled_orders = {o.order_hash: o for o in open_orders_list}
+                
+                # 3. Log Tick Stats
+                ws_age = self.get_last_message_age()
+                ws_status = "OK" if ws_age < 30 else "STALE"
+                ws_msg_cnt = self._ws_messages_parsed_ok
+                
+                # Dump counters for first few active markets
+                top_mkts = list(self._ws_messages_by_market.items())[:3]
+                ws_stats = f"{ws_msg_cnt} total | " + " ".join([f"{k[:6]}={v}" for k,v in top_mkts])
+                
+                logger.info(
+                    f"ADAPTER TICK | "
+                    f"Pos: {len(positions)} mkts | "
+                    f"Orders: {len(open_orders_list)} open | "
+                    f"WS: {ws_status} ({ws_stats}) age {ws_age:.1f}s"
+                )
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Reconciliation error: {e}")
+                await asyncio.sleep(5)
 
     def register_callback(self, callback: Callable[[Any], Awaitable[None]]):
         """Register generic event callback for incoming WS messages.

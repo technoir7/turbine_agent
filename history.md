@@ -606,3 +606,12 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 4. **Integration Tests**:
    - Verified new `verify_order_placement` logic with mocked `get_order` and `get_markets`.
    - Ensures strict mock compliance (no assumptions on internal state).
+
+### Update 2026-01-30: Integration Hardening & Robustness 🛡️
+**Objective**: Fix observed integration failures (positions NoneType, 404 on cancel, invalid verification).
+**Changes**:
+1. **Positions Parsing**: Safeguarded `get_positions` against None/null returns from API.
+2. **Order Verification**: Replaced flaky `get_order(hash)` checks with robust `get_orders(status='open')` + list filtering.
+3. **Cancel Logic**: Implemented "Reconciliation-First" cancel. Uses locally cached authoritative order state to determine correct Side and Market ID before cancelling. Handles 404s by double-checking existence.
+4. **Integration Probe**: Updated `connectivity_probe.py` to run a full `Place -> Verify (List) -> Cancel -> Verify (Gone)` lifecycle test.
+5. **WS Instrumentation**: Added counters for messages per market ID to prove we are receiving data for the *target* market.
