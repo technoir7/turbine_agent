@@ -10,30 +10,59 @@ exchange:
   request_timeout: 5.0
   ack_timeout: 5.0
   
-  # Feature flags (set to true only if confirmed supported)
+  # Feature flags
   features:
     post_only: false
     gtd_orders: false
     batch_cancel: false
-    nonce_required: false # Set true if exchange requires incrementing nonces
+    nonce_required: false
 
 strategy:
   # Market Making
-  base_spread: 0.30
+  base_spread: 0.30      # WIDENED to 0.30 for safety/profitability
   min_price: 0.01
+  max_price: 0.99        # RESTORED
+  
+  # Inventory Skew
+  skew_factor: 0.01 
+  
+  # Imbalance Overlay
+  imbalance_depth_n: 5
+  imbalance_threshold: 2.0
+  overlay_bias: 0.005
+  persistence_seconds: 30.0
+  
+  # Extremes Risk Control
+  extreme_low: 0.10
+  extreme_high: 0.90
+  extreme_spread_mult: 2.0
+  extreme_size_mult: 0.5
 
-# ... (skipping lines) ...
+rollover:
+  enabled: true
+  poll_interval: 10.0
+
+risk:
+  # Hard Limits
+  max_inventory_units: 1000
+  max_portfolio_exposure: 10000.0
+  
+  # Drawdown
+  hard_drawdown_limit: 0.10
+  soft_drawdown_limit: 0.05
+  
+  # Volatility Guard
+  vol_lookback_seconds: 60
+  vol_pause_threshold: 0.05
 
 loop:
-  tick_interval_ms: 2000
-  reconcile_interval_ms: 2000
+  tick_interval_ms: 2000      # SLOWED to 2000ms to allow burst smoothing
+  reconcile_interval_ms: 2000 # Matching tick
   replace_threshold: 0.001
-  reconcile_interval_ms: 500
-  replace_threshold: 0.001 # min price drift to trigger modify/replace
   max_quote_age_seconds: 30.0
 
 logging:
   level: "INFO"
   file_path: "turbine_agent.log"
-  rotation_max_bytes: 10485760 # 10MB
+  rotation_max_bytes: 10485760
   rotation_backup_count: 5
