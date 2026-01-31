@@ -281,7 +281,7 @@ class TurbineAdapter(ExchangeAdapter):
     async def _process_ws_messages(self):
         """Background task to process incoming WebSocket messages."""
         import time
-        from ..core.events import BookDeltaEvent, TradeEvent, Side as InternalSide
+        from ..core.events import BookSnapshotEvent, TradeEvent, Side as InternalSide
         
         try:
             async for message in self._ws_connection:
@@ -331,8 +331,8 @@ class TurbineAdapter(ExchangeAdapter):
             logger.error(f"WebSocket message processor error: {e}{close_info}", exc_info=True)
 
     def _translate_to_internal_events(self, message) -> list:
-        """Translate raw WSMessage to internal events (BookDelta, Trade)."""
-        from ..core.events import BookDeltaEvent, TradeEvent, Side as InternalSide
+        """Translate raw WSMessage to internal events (BookSnapshot, Trade)."""
+        from ..core.events import BookSnapshotEvent, TradeEvent, Side as InternalSide
         import time
         
         events = []
@@ -345,6 +345,8 @@ class TurbineAdapter(ExchangeAdapter):
 
         # Scale factor for Turbine (6 decimals usually, check docs carefully or config)
         # Using 1e6 as standard for this exchange based on previous knowledge
+        # Price: 0-1,000,000 -> 0.0-1.0
+        # Size: 1,000,000 -> 1.0 share
         SCALE = 1_000_000.0
 
         if msg_type == 'orderbook':
@@ -353,32 +355,25 @@ class TurbineAdapter(ExchangeAdapter):
             asks_data = data.get('asks', [])
             last_update = data.get('lastUpdate', int(time.time() * 1000))
             
-            # Debug payload sizes - REMOVED
-            # if os.environ.get("TURBINE_WS_DEBUG"):
-            #      import logging
-            #      logger = logging.getLogger(__name__)
-            #      logger.info(f"Translating OrderBook: {market_id[:8]} bids={len(bids_data)} asks={len(asks_data)}")
-
-            # Map Bids (Side 0 -> InternalSide.BID)
-            for bid in bids_data:
-                events.append(BookDeltaEvent(
-                    seq=last_update,  # Using timestamp as substitute for sequence
-                    market_id=market_id,
-                    side=InternalSide.BID,
-                    price=float(bid['price']) / SCALE,
-                    size=float(bid['size']) / SCALE
-                ))
+            # Map Bids
+            bids_tuples = [
+                (float(b['price']) / SCALE, float(b['size']) / SCALE)
+                for b in bids_data
+            ]
                 
-            # Map Asks (Side 1 -> InternalSide.ASK)
-            for ask in asks_data:
-                events.append(BookDeltaEvent(
-                    seq=last_update,
-                    market_id=market_id,
-                    side=InternalSide.ASK,
-                    price=float(ask['price']) / SCALE,
-                    size=float(ask['size']) / SCALE
-                ))
-                
+            # Map Asks
+            asks_tuples = [
+                (float(a['price']) / SCALE, float(a['size']) / SCALE)
+                for a in asks_data
+            ]
+            
+            events.append(BookSnapshotEvent(
+                seq=last_update,
+                market_id=market_id,
+                bids=bids_tuples,
+                asks=asks_tuples
+            ))
+            
         elif msg_type == 'trade':
             # Data structure: {'price': int, 'size': int, 'side': int, 'timestamp': int, ...}
             # Turbine Side: 0=BUY (Aggr Buyer -> Maker Seller?), 1=SELL

@@ -29,6 +29,18 @@ class OrderBook:
         else:
             target[price] = size
 
+    def apply_snapshot(self, seq: int, bids: List[Tuple[float, float]], asks: List[Tuple[float, float]]):
+        """Apply a full orderbook snapshot, replacing existing state."""
+        if seq < self.last_seq:
+            return # Ignore stale
+        
+        self.last_seq = seq
+        self.last_update_ts = time.time()
+        
+        # Replace maps
+        self.bids = {price: size for price, size in bids if size > 0}
+        self.asks = {price: size for price, size in asks if size > 0}
+
     def get_best_bid(self) -> Optional[Tuple[float, float]]:
         if not self.bids: return None
         best_price = max(self.bids.keys())

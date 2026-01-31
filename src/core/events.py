@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, List, Tuple
 
 class Side(Enum):
     BID = "BID"
@@ -21,6 +21,13 @@ class BookDeltaEvent:
     side: Side
     price: float
     size: float
+
+@dataclass
+class BookSnapshotEvent:
+    seq: int
+    market_id: str
+    bids: List[Tuple[float, float]] # [(price, size), ...]
+    asks: List[Tuple[float, float]]
 
 @dataclass
 class TradeEvent:

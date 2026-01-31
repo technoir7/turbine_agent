@@ -617,3 +617,5 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 6. **Canonical Cancel**: Enforced strict `cancel_order` logic using `market_id` and `side` (mapped from int->str->Enum) to satisfy API requirements.
 7. **Two-Way Trade Verification**: specific `connectivity_probe.py` update to place/verify/cancel BOTH Buy and Sell orders to prove side mapping correctness.
 8. **Log Cleanup**: Silenced "API returned None" warning for positions to DEBUG level (normal for empty portfolios).
+9. **Event Translation Layer**: Fully implemented parsing of WS `orderbook` snapshots into `BookSnapshotEvent` and `trade` messages into `TradeEvent`. Updated `Supervisor` to consume these endpoints, enabling real-time internal state updates.
+10. **Event Verification**: Added `connectivity_probe.py --event-test` to prove end-to-end flow from WebSocket -> Adapter -> Internal Event.

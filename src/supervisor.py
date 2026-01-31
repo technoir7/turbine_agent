@@ -6,7 +6,7 @@ from typing import Optional
 
 from .config.loader import load_config
 from .core.state import StateStore, OrderBook
-from .core.events import BookDeltaEvent, TradeEvent, OrderAckEvent, UserFillEvent, OrderStatus, HeartbeatEvent
+from .core.events import BookDeltaEvent, BookSnapshotEvent, TradeEvent, OrderAckEvent, UserFillEvent, OrderStatus, HeartbeatEvent
 from .exchange.interface import ExchangeAdapter
 from .exchange.turbine import TurbineAdapter
 from .exchange.simulated import SimulatedExchange
@@ -177,9 +177,9 @@ class Supervisor:
     async def on_event(self, event):
         """Handle incoming events from Adapter."""
         try:
-            if isinstance(event, BookDeltaEvent):
+            if isinstance(event, BookSnapshotEvent):
                 book = self.state.get_orderbook(event.market_id)
-                book.apply_delta(event.seq, event.side, event.price, event.size)
+                book.apply_snapshot(event.seq, event.bids, event.asks)
                 
                 # Proof Logging (Rate Limited 5s)
                 now = time.time()
@@ -201,6 +201,11 @@ class Supervisor:
                                  f"MID={mid_str}{reason} BID={bb_str} ASK={ba_str} "
                                  f"seq={book.last_seq} bids={len(book.bids)} asks={len(book.asks)}")
                      self.last_proof_log_ts = now
+                
+            elif isinstance(event, BookDeltaEvent):
+                # Deprecated or fall-back
+                book = self.state.get_orderbook(event.market_id)
+                book.apply_delta(event.seq, event.side, event.price, event.size)
                 
             elif isinstance(event, UserFillEvent):
                 logger.info(f"Fill: {event.side} {event.size} @ {event.price}")

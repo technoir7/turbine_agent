@@ -35,16 +35,15 @@
 
 **Current State** (2026-01-30):
 - ✅ WebSocket connects successfully
-- ✅ Messages received and logged
-- ✅ Messages translated and applied to state (verified via Supervisor logs)
+- ✅ Messages parsed and translated to `BookSnapshotEvent` and `TradeEvent`
+- ✅ Supervisor consumes events via `on_event`
+- ✅ End-to-end flow verified via `--event-test`
 
 **Implementation**:
-- In `TurbineAdapter._process_ws_messages()`, parse `WSMessage` objects BEFORE dispatching:
-  - `type="orderbook"` + `data` → Create `BookDeltaEvent` from orderbook snapshot
-  - `type="trade"` + `data` → Create `TradeEvent` with fill details
-  - Use exact field mappings from official client's `WSMessage` types
-- Only then dispatch translated events to supervisor callbacks
-- No invented fields - mirror official client exactly
+- In `TurbineAdapter._process_ws_messages()`:
+  - `type="orderbook"` → `BookSnapshotEvent` (via `_translate_to_internal_events`)
+  - `type="trade"` → `TradeEvent`
+
 
 ### 3.2 Spread Optimization
 **Goal**: Find profitable spread settings for BTC quick markets.

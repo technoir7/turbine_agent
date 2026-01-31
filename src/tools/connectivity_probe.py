@@ -346,11 +346,63 @@ async def perform_trade_test(config: Dict[str, Any]) -> bool:
             pass
         return False
 
+async def perform_event_test(config: Dict[str, Any]):
+    """Verify Event Translation Layer (raw WS -> Internal Event)."""
+    print_header("Performing Event Translation Test")
+    from src.exchange.turbine import TurbineAdapter
+    from src.core.events import BookSnapshotEvent, TradeEvent
+    
+    adapter = TurbineAdapter(config)
+    received_events = []
+    
+    async def probe_callback(event):
+        received_events.append(event)
+        if isinstance(event, BookSnapshotEvent):
+            print_pass(f"Received Snapshot: {len(event.bids)} bids, {len(event.asks)} asks (seq={event.seq})")
+        elif isinstance(event, TradeEvent):
+            print_pass(f"Received Trade: {event.size} @ {event.price} ({event.aggressor_side})")
+        else:
+            print_info(f"Received Event: {event.__class__.__name__}")
+
+    try:
+        await adapter.connect()
+        adapter.register_callback(probe_callback)
+        
+        qm = adapter.get_quick_market("BTC")
+        print_step(f"Subscribing to {qm.market_id}...")
+        await adapter.subscribe_markets([qm.market_id])
+        
+        print_step("Listening for 10s...")
+        for _ in range(10):
+            await asyncio.sleep(1)
+            if len(received_events) >= 3:
+                break
+                
+        if not received_events:
+            print_fail("No events received!")
+            return False
+            
+        # Verify we got at least one snapshot
+        has_snapshot = any(isinstance(e, BookSnapshotEvent) for e in received_events)
+        if not has_snapshot:
+            print_fail("No BookSnapshotEvent received (Translation failed?)")
+            return False
+            
+        print_pass(f"Event Flow Verified ({len(received_events)} events)")
+        await adapter.close()
+        return True
+        
+    except Exception as e:
+        print_fail(f"Event Test Error: {e}")
+        await adapter.close()
+        return False
+        
 async def main():
     parser = argparse.ArgumentParser(description="Turbine Connectivity Probe")
     parser.add_argument("--symbol", default="BTC", help="Asset symbol (default: BTC)")
     parser.add_argument("--ws", action="store_true", help="Run WebSocket checks")
     parser.add_argument("--trade-test", action="store_true", help="Run full trade lifecycle test")
+    parser.add_argument("--event-test", action="store_true", help="Run event translation test")
     parser.add_argument("--seconds", type=int, default=15, help="Duration for WS check")
     parser.add_argument("--auto-register", action="store_true", help="Auto-register API keys if missing")
     parser.add_argument("--config", default="config.yaml", help="Path to config")
@@ -362,21 +414,19 @@ async def main():
         config = load_config(args.config)
     except Exception as e:
         print(f"⚠ Config load warning: {e}")
-        # Make a dummy config if load fails (might rely on defaults)
         config = {'exchange': {}}
     
     # 2. Check Credentials
     if not check_credentials(auto_register=args.auto_register):
         sys.exit(1)
 
-    # 3. Trade Test (Excludes other tests to keep it clean, or runs them?)
-    # Let's run trade test exclusively if requested
+    if args.event_test:
+        success = await perform_event_test(config)
+        sys.exit(0 if success else 1)
+
     if args.trade_test:
         success = await perform_trade_test(config)
-        if not success:
-            sys.exit(1)
-        print("\n✨ TRADE PROBE PASSED ✨")
-        sys.exit(0)
+        sys.exit(0 if success else 1)
 
     # 3. HTTP Check
     market_id = check_http_connectivity(args.symbol)
