@@ -8,6 +8,8 @@ Algorithm: Inventory-Aware Market Maker with Risk Controls
 import asyncio
 import os
 import re
+
+import csv
 import time
 import json
 import logging
@@ -58,7 +60,9 @@ CONFIG = {
         "extreme_low": 0.10,
         "extreme_high": 0.90,
         "extreme_spread_mult": 2.0,
+        "extreme_spread_mult": 2.0,
         "extreme_size_mult": 0.5,
+        "stop_loss_pct": 0.10,    # 10% Trailing Stop
     },
     "risk": {
         "max_inventory_units": 1000,
@@ -142,6 +146,35 @@ class MarketState:
     position: float = 0.0 
     open_orders: Dict[str, dict] = field(default_factory=dict) # client_id/hash -> Order Info
     price_history: deque = field(default_factory=lambda: deque(maxlen=30)) # For SMA-30 trend detection
+    
+    # Stop Loss Tracking
+    trailing_high: float = 0.0      # High water mark (for Longs)
+    trailing_low: float = 1.0       # Low water mark (for Shorts)
+    stop_triggered: bool = False
+    stop_cooldown_ts: float = 0.0
+
+# ============================================================
+# DATA RECORDER
+# ============================================================
+class CSVLogger:
+    def __init__(self, filename="market_data.csv"):
+        self.filename = filename
+        self._ensure_header()
+        
+    def _ensure_header(self):
+        if not os.path.exists(self.filename):
+            with open(self.filename, 'w', newline='') as f:
+                f.write("ts,market_id,mid,regime,inv,bid,ask\n")
+
+    def log_tick(self, market_id, mid, regime, inv, bid, ask):
+        """Append a tick record."""
+        try:
+            with open(self.filename, 'a', newline='') as f:
+                # Simple CSV formatting
+                line = f"{time.time():.3f},{market_id},{mid},{regime},{inv:.2f},{bid or ''},{ask or ''}\n"
+                f.write(line)
+        except Exception as e:
+            pass # Never crash the bot for logging
 
 # ============================================================
 # BOT LOGIC
@@ -156,6 +189,8 @@ class MarketMakerBot:
         self.contract_address: str | None = None 
         self.start_price: int = 0
         self.end_time: int = 0 # Unix TS
+        
+        self.recorder = CSVLogger()
         
         # Strategy State
         self.state = MarketState()
@@ -349,6 +384,101 @@ class MarketMakerBot:
             
         return 0.0
 
+    async def check_stop_loss(self, mid: float) -> bool:
+        """Check and trigger trailing stop loss."""
+        # cooldowned?
+        if self.state.stop_triggered:
+            if time.time() > self.state.stop_cooldown_ts:
+                logger.info("Stop Loss Cooldown Expired. Resuming...")
+                self.state.stop_triggered = False
+                # Reset tracking
+                self.state.trailing_high = mid
+                self.state.trailing_low = mid
+            else:
+                return True # Still stopped
+
+        pos = self.state.position
+        pct = CONFIG['strategy']['stop_loss_pct'] # e.g. 0.10
+        
+        # 1. Update Water Marks
+        if pos > 0.1: # LONG
+            if mid > self.state.trailing_high:
+                self.state.trailing_high = mid
+            
+            # Check Drawdown
+            # If Mid < High * (1 - pct)
+            drop_limit = self.state.trailing_high * (1.0 - pct)
+            if mid < drop_limit:
+                logger.warning(f"STOP LOSS TRIGGERED (LONG): Price {mid:.3f} < {drop_limit:.3f} (High: {self.state.trailing_high:.3f})")
+                await self.panic_close(side='sell')
+                return True
+                
+        elif pos < -0.1: # SHORT
+            if mid < self.state.trailing_low:
+                self.state.trailing_low = mid
+                
+            # Check Drawdown (Rise)
+            # If Mid > Low * (1 + pct)
+            rise_limit = self.state.trailing_low * (1.0 + pct)
+            if mid > rise_limit:
+                logger.warning(f"STOP LOSS TRIGGERED (SHORT): Price {mid:.3f} > {rise_limit:.3f} (Low: {self.state.trailing_low:.3f})")
+                await self.panic_close(side='buy')
+                return True
+        else:
+            # Flat - Reset trackers to current price
+            self.state.trailing_high = mid
+            self.state.trailing_low = mid
+            
+        return False
+
+    async def panic_close(self, side: str):
+        """Execute panic close."""
+        self.state.stop_triggered = True
+        self.state.stop_cooldown_ts = time.time() + 60 # 1 min cooldown
+        
+        # 1. Cancel All
+        await self.cancel_all_orders(self.market_id)
+        
+        # 2. Place Market Order (Crossing Limit)
+        # We use a massive skew or just a limit order that crosses far.
+        size = int(abs(self.state.position) * 1_000_000)
+        if size <= 0: return
+
+        price = 0.01 if side == 'sell' else 0.99
+        logger.warning(f"PANIC CLOSE: Placing {side.upper()} {size} @ {price}")
+        
+        try:
+            # To be safe and fast, we just implement simple place here
+            expiration = int(time.time() + 60)
+            if side == 'buy':
+                o = self.client.create_limit_buy(
+                    self.market_id, Outcome.YES, int(price * 1e6), size, expiration, self.settlement_address
+                )
+                # For buy, we need permit for cost
+                # Cost = size * price. 
+                # price=0.99 -> cost=0.99 USDC per share.
+                val = (size * int(price*1e6)) // 1_000_000
+                fee = size // 100
+                total = ((val+fee)*110)//100
+                permit = self.client.sign_usdc_permit(total, self.settlement_address)
+                o.permit_signature = permit
+                self.client.post_order(o)
+            else:
+                o = self.client.create_limit_sell(
+                    self.market_id, Outcome.YES, int(price * 1e6), size, expiration, self.settlement_address
+                )
+                # Sell permit
+                amt = (size * 110)//100
+                permit = self.client.sign_usdc_permit(amt, self.settlement_address)
+                o.permit_signature = permit
+                self.client.post_order(o)
+                
+            logger.warning("PANIC CLOSE SENT.")
+            
+        except Exception as e:
+            logger.error(f"Panic Close Failed: {e}")
+
+
     def compute_quotes(self) -> Tuple[Optional[float], Optional[float]]:
         """Calculate implementation of Spike Strategy."""
         # 1. Stale Check
@@ -447,10 +577,21 @@ class MarketMakerBot:
                         # Track history
                         self.state.price_history.append(mid)
                         
+                        # 1b. Check Stop Loss
+                        if await self.check_stop_loss(mid):
+                            await asyncio.sleep(2)
+                            continue
+                        
                     regime_str = "NEUT"
                     r_skew = self._get_regime_skew()
                     if r_skew > 0: regime_str = "BULL"
                     elif r_skew < 0: regime_str = "BEAR"
+                    
+                    # Log to CSV
+                    self.recorder.log_tick(
+                        self.market_id, mid_str, regime_str, 
+                        self.state.position, bid, ask
+                    )
                     
                     logger.info(f"Tick: Mid={mid_str} [{regime_str}] Inv={self.state.position:.1f} Bid={bid} Ask={ask}")
 
