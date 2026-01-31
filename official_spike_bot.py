@@ -715,19 +715,19 @@ class MarketMakerBot:
              
         # 2. Aggressive Ask (Sell High/Inventory)
         if best_ask:
-             # If we are selling, and Model says 0.52, but Market is 0.80.
-             # We can sell at 0.799.
-             # Logic: Ask = Max(ModelAsk, BestAsk - 1 tick) -> Try to get better price?
-             # User said: "Current ask way too high". 
-             # Implies Model=0.52, Market=0.25. We are not filling.
-             # So we must UNDERCUT the market to fill.
-             competitive_ask = best_ask - 0.001
-             # If Model says 0.52 (Cost Basis), can we sell at 0.25 (Loss)?
-             # If Logic says we need to dump, yes.
-             # But normally we want to sell at Max(Model, Market).
-             # Wait, to be competitive we want Min(Model, Market - tick).
-             # We want to be the best price.
-             final_ask = min(final_ask, competitive_ask)
+             # AGGRESSIVE DUMP MODE
+             # If we have inventory, we want to be the FIRST ask the buyer hits.
+             # We target Best Bid + 0.001 (Front run the bid spread).
+             if self.state.position > 0 and best_bid:
+                 competitive_ask = best_bid + 0.001
+                 # Safety: Don't sell below min
+                 competitive_ask = max(0.02, competitive_ask)
+                 # We take the LOWER of Model or Competitive. We want to sell.
+                 final_ask = competitive_ask # Override model. Just dump.
+             else:
+                 # Normal Undercut
+                 competitive_ask = best_ask - 0.001
+                 final_ask = min(final_ask, competitive_ask)
              
              # Safety: Don't sell below min price (e.g 0.02)
              final_ask = max(0.02, final_ask)
@@ -1016,6 +1016,15 @@ class MarketMakerBot:
                     )
 
                     # 4. Execute
+                    # Stale Flush Check (Phase 8)
+                    # If we have inventory and haven't filled in 20s -> DUMP
+                    time_since_fill = time.time() - self.last_fill_ts
+                    if abs(self.state.position) > 0 and time_since_fill > 20:
+                        logger.warning(f"STALE INVENTORY ({time_since_fill:.1f}s): FLUSHING!")
+                        if self.state.position > 0: await self.panic_close('sell')
+                        elif self.state.position < 0: await self.panic_close('buy')
+                        continue
+
                     # Market Order Mode?
                     if pricing['use_market_orders']:
                          if self.state.position > 0: await self.panic_close('sell')
@@ -1032,6 +1041,9 @@ class MarketMakerBot:
                     
                     if inv >= max_p: allow_bid = False
                     if inv <= -max_p: allow_ask = False
+                    
+                    # Phase 8: Dump Mode - Stop Accumulating
+                    if inv > 0: allow_bid = False
                     
                     # Phase 5: Regime-Based Limits
                     # Bull: Max Short 0 (Don't allow net short, or strictly reduce)
