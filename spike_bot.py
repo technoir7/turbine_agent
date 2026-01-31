@@ -248,6 +248,8 @@ class TurbineSpike:
 
         # Converge Bids
         await self._converge_side('buy', bid_price)
+        # Add small delay between sides to separate bursts
+        await asyncio.sleep(0.5)
         # Converge Asks
         await self._converge_side('sell', ask_price)
 
@@ -270,6 +272,8 @@ class TurbineSpike:
         if drift > self.config['loop']['replace_threshold'] or age > self.config['loop']['max_quote_age_seconds']:
             logger.info(f"Replacing {side}: Drift {drift:.4f} or Age {age:.1f}s")
             await self.cancel_order(existing.id)
+            # Add small delay between cancel and place
+            await asyncio.sleep(0.2)
             await self.place_order(side, price)
 
     # --- Exchange Primitives ---

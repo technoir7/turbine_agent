@@ -620,3 +620,5 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 9. **Event Translation Layer**: Fully implemented parsing of WS `orderbook` snapshots into `BookSnapshotEvent` and `trade` messages into `TradeEvent`. Updated `Supervisor` to consume these endpoints, enabling real-time internal state updates.
 10. **Event Verification**: Added `connectivity_probe.py --event-test` to prove end-to-end flow from WebSocket -> Adapter -> Internal Event.
 11. **UX Polish**: Silenced noisy `httpx` logs and added explicit connectivity feedback ("✅ DATA RECEIVED") to `spike_bot.py`. Reduced "Tick" log frequency to 60s.
+12. **Position Awareness**: Fixed "Inv=0.0" logging bug by adding explicit `get_positions` polling to `spike_bot.py`.
+13. **Rate Limit Tuning**: Increased tick interval to 2s and added inter-request delays (0.2s/0.5s) to prevent API rate limit errors.
