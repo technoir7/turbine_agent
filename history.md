@@ -614,4 +614,5 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 2. **Order Verification**: Replaced flaky `get_order(hash)` checks with robust `get_orders(status='open')` + list filtering.
 3. **Cancel Logic**: Implemented "Reconciliation-First" cancel. Uses locally cached authoritative order state to determine correct Side and Market ID before cancelling. Handles 404s by double-checking existence.
 4. **Integration Probe**: Updated `connectivity_probe.py` to run a full `Place -> Verify (List) -> Cancel -> Verify (Gone)` lifecycle test.
-5. **WS Instrumentation**: Added counters for messages per market ID to prove we are receiving data for the *target* market.
+6. **Canonical Cancel**: Enforced strict `cancel_order` logic using `market_id` and `side` (mapped from int->str->Enum) to satisfy API requirements.
+7. **Two-Way Trade Verification**: specific `connectivity_probe.py` update to place/verify/cancel BOTH Buy and Sell orders to prove side mapping correctness.

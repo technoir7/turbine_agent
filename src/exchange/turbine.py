@@ -659,13 +659,18 @@ class TurbineAdapter(ExchangeAdapter):
             # Submit the order
             result = self._rest_client.post_order(signed_order)
             order_hash = result.get('orderHash', signed_order.order_hash)
+            matches = result.get('matches', [])
             
-            logger.info(f"Order placed: {order_hash}")
+            logger.info(f"Order placed: {order_hash} (matches: {len(matches)})")
             
             # TRUTH CHECK: Updated to verify_order_exists (list based)
-            is_verified = await self._verify_order_exists(order_hash)
-            if not is_verified:
-                logger.error(f"CRITICAL: Order {order_hash} placed but NOT found in API verification! marking as unconfirmed.")
+            # Only verify if NO matches (if matches exist, it might be filled/gone already)
+            if not matches:
+                is_verified = await self._verify_order_exists(order_hash)
+                if not is_verified:
+                    logger.error(f"CRITICAL: Order {order_hash} placed (unmatched) but NOT found in API verification!")
+            else:
+                 logger.info(f"Order {order_hash} matched immediately ({len(matches)} fills). Skipping open order check.")
             
             return order_hash
             
@@ -716,56 +721,61 @@ class TurbineAdapter(ExchangeAdapter):
     # I will stick to JUST replacing verification and cancel here.
 
     async def cancel_order(self, order: Order):
-        """Cancel specific order with robust side/id lookup."""
+        """Cancel specific order using CANONICAL exchange params."""
         self._require_auth()
         self._check_fresh_or_raise("cancel_order")
         
         try:
-            from turbine_client.types import Side as TurbineSide
-            
             order_hash = order.exchange_order_id or order.client_order_id
             if not order_hash:
                 logger.error("Cancel failed: No order hash provided")
                 return
 
             # RECONCILIATION-FIRST LOOKUP
-            # Try to find authoritative side/market from our recon cache
             cached_order = self._last_reconciled_orders.get(order_hash)
             
-            target_side = None
+            target_side_str = None
             target_market = order.market_id
             
             if cached_order:
-                # Use cached truth
-                target_side = TurbineSide.BUY if cached_order.side == 0 else TurbineSide.SELL
+                # Use cached truth (turbine client object)
+                # cached_order.side is int: 0=BUY, 1=SELL
+                target_side_str = "buy" if cached_order.side == 0 else "sell"
                 target_market = cached_order.market_id
-                logger.debug(f"Cancel: Found cached order {order_hash}, side={target_side}, mkt={target_market}")
+                logger.debug(f"Cancel: Found cached order {order_hash}, side={target_side_str}, mkt={target_market}")
             else:
                 # Fallback to local passed order object
-                turbine_side = TurbineSide.BUY if order.side == Side.BID else TurbineSide.SELL
-                target_side = turbine_side
-                logger.warning(f"Cancel: Order {order_hash} not in recon cache. Using local side {target_side}.")
+                target_side_str = "buy" if order.side == Side.BID else "sell"
+                logger.warning(f"Cancel: Order {order_hash} not in recon cache. Using local side {target_side_str}.")
 
             try:
+                # The generic cancel_order calls DELETE /orders/{orderHash} with params
+                # We must be explicit with args
+                # RE-READING CLIENT:
+                # def cancel_order(self, order_hash: str, market_id: str, side: Side)
+                # It converts side enum to string "buy"/"sell".
+                # We need to pass the correct Enum.
+                from turbine_client.types import Side as TurbineSide
+                tside = TurbineSide.BUY if target_side_str == "buy" else TurbineSide.SELL
+                
                 result = await asyncio.to_thread(
                     self._rest_client.cancel_order,
                     order_hash=order_hash,
                     market_id=target_market,
-                    side=target_side,
+                    side=tside,
                 )
                 logger.info(f"Order cancelled: {order_hash}")
                 
             except Exception as e:
                 # Handle 404 - "Not Found"
                 if "404" in str(e) or "not found" in str(e).lower():
-                    # Check if it's REALLY gone or just wrong side
                     logger.warning(f"Cancel 404 for {order_hash}. Verifying if it is closed...")
                     exists = await self._verify_order_exists(order_hash)
                     if not exists:
-                         logger.info(f"Order {order_hash} confirmed confirmed gone (404 was valid).")
+                         logger.info(f"Order {order_hash} confirmed gone (404 was valid/redundant).")
                          return
                     else:
-                         logger.error(f"Order {order_hash} exists but Cancel 404'd! Mismatch side/market?")
+                         logger.error(f"Order {order_hash} exists in API list but Cancel 404'd! Parameter mismatch?")
                          raise
                 else:
                     raise
@@ -775,12 +785,7 @@ class TurbineAdapter(ExchangeAdapter):
             raise
 
     async def cancel_all(self, market_id: Optional[str] = None):
-        """Cancel all open orders (safety switch).
-        
-        Args:
-            market_id: Optional market ID to restrict cancellation to.
-        """
-
+        """Cancel all open orders (safety switch)."""
         self._require_auth()
         self._check_fresh_or_raise("cancel_all")
         
@@ -789,8 +794,9 @@ class TurbineAdapter(ExchangeAdapter):
         try:
             from turbine_client.types import Side as TurbineSide
             
-            # Fetch open orders
-            open_orders = self._rest_client.get_orders(
+            # Fetch open orders to know what to cancel
+            open_orders = await asyncio.to_thread(
+                self._rest_client.get_orders,
                 trader=self._rest_client.address,
                 market_id=market_id,
                 status="open",
@@ -800,16 +806,19 @@ class TurbineAdapter(ExchangeAdapter):
             
             for turbine_order in open_orders:
                 try:
-                    side = TurbineSide.BUY if turbine_order.side == 0 else TurbineSide.SELL
-                    self._rest_client.cancel_order(
+                    # STRICT MAPPING: 0=BUY, 1=SELL
+                    side_enum = TurbineSide.BUY if turbine_order.side == 0 else TurbineSide.SELL
+                    
+                    await asyncio.to_thread(
+                        self._rest_client.cancel_order,
                         order_hash=turbine_order.order_hash,
                         market_id=turbine_order.market_id,
-                        side=side,
+                        side=side_enum,
                     )
                     logger.info(f"Cancelled order: {turbine_order.order_hash}")
                 except Exception as e:
-                    logger.error(f"Failed to cancel order {turbine_order.order_hash}: {e}")
-                    
+                     logger.error(f"Failed to cancel order {turbine_order.order_hash}: {e}")
+                     
         except Exception as e:
             logger.error(f"cancel_all failed: {e}")
             raise

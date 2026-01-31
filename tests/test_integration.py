@@ -179,20 +179,22 @@ class TestTurbineAdapter(unittest.IsolatedAsyncioTestCase):
         from src.exchange.turbine import TurbineAdapter
         from src.core.events import Side
         from src.core.state import Order
+        from turbine_client.types import Side as TurbineSide
         
         # Setup mock client
         mock_client = Mock()
         mock_client_class.return_value = mock_client
         
-        # Mock get_orders for verification (Success case)
-        # Returns list of orders, including ours
+        # Mock get_orders for verification (Success case, side 0 = BUY)
         mock_order = MagicMock()
         mock_order.order_hash = "0x123"
+        mock_order.market_id = "m1" # Explicitly set market_id string
+        mock_order.side = 0
         mock_client.get_orders.return_value = [mock_order]
         
-        # Mock create/post
+        # Mock create/post with NO matches (triggering verification)
         mock_client.create_limit_buy.return_value = MagicMock(order_hash="0x123")
-        mock_client.post_order.return_value = {'orderHash': '0x123'}
+        mock_client.post_order.return_value = {'orderHash': '0x123', 'matches': []}
         
         # Mock get_market (called during placement)
         mock_market = MagicMock(id="m1", market_id="m1", settlement_address="0xsettle")
@@ -222,8 +224,19 @@ class TestTurbineAdapter(unittest.IsolatedAsyncioTestCase):
             order_hash = await adapter.place_order(order)
             
             self.assertEqual(order_hash, "0x123")
-            # Verify get_orders call was made (list based verification)
+            # Verify get_orders call was made because matches were empty
             mock_client.get_orders.assert_called()
+            
+            # Now test CANCEL with derived side
+            order.exchange_order_id = "0x123"
+            await adapter.cancel_order(order)
+            
+            # Verify cancel_order called with Side.BUY (from cached order side 0)
+            mock_client.cancel_order.assert_called_with(
+                order_hash="0x123",
+                market_id="m1", # taken from cache
+                side=TurbineSide.BUY
+            )
 
     @patch('turbine_client.TurbineClient')
     async def test_get_positions_safeguards(self, mock_client_class):

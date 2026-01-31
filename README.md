@@ -185,10 +185,10 @@ The agent monitors the relative depth of the top 5 levels of the orderbook.
     python -m src.tools.connectivity_probe --auto-register
 
     # Full Trade Lifecycle Proof (Verify Place/Cancel)
-    # WARNING: Executes real orders!
+    # WARNING: Executes real orders (Buy + Sell)!
     python -m src.tools.connectivity_probe --trade-test
     ```
-    Expected: "CONNECTIVITY PROBE PASSED" with counts of messages received.
+    Expected: "CONNECTIVITY PROBE PASSED" with confirmation of both orders placed, verified open, and cancelled.
 
 4.  **Run Simulation (No Trading)**:
     ```bash

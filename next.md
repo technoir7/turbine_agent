@@ -154,8 +154,9 @@
 - ✅ Price/size decimal conversions verified
 - ✅ Settlement addresses fetched from `get_markets()` and cached
 - ✅ State Reconciliation: Periodic "ADAPTER TICK" logs authoritative position/order counts
-- ✅ Trade Verification: `connectivity_probe.py --trade-test` proves ability to place/verify/cancel orders
+- ✅ Trade Verification: `connectivity_probe.py --trade-test` proves ability to place/verify/cancel orders (BOTH Buy and Sell sides verified)
 - ✅ Robust State Parsing: Handles NoneType positions and 404 cancels gracefully
+- ✅ Canonical Cancel: Strict Side/MarketID mapping for deterministic cancellations
 - ✅ WS Message Filtering: Tracks messages per target market to ensure relevant feed freshness
 
 ### Open Questions
