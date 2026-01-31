@@ -933,12 +933,20 @@ class TurbineAdapter(ExchangeAdapter):
                 top_mkts = list(self._ws_messages_by_market.items())[:3]
                 ws_stats = f"{ws_msg_cnt} total | " + " ".join([f"{k[:6]}={v}" for k,v in top_mkts])
                 
-                logger.info(
-                    f"ADAPTER TICK | "
-                    f"Pos: {len(positions)} mkts | "
-                    f"Orders: {len(open_orders_list)} open | "
-                    f"WS: {ws_status} ({ws_stats}) age {ws_age:.1f}s"
-                )
+                if ws_status != "OK":
+                     logger.warning(
+                        f"ADAPTER WARNING | "
+                        f"Pos: {len(positions)} mkts | "
+                        f"Orders: {len(open_orders_list)} open | "
+                        f"WS: {ws_status} ({ws_stats}) age {ws_age:.1f}s"
+                    )
+                else:
+                    logger.debug(
+                        f"ADAPTER TICK | "
+                        f"Pos: {len(positions)} mkts | "
+                        f"Orders: {len(open_orders_list)} open | "
+                        f"WS: {ws_status} ({ws_stats}) age {ws_age:.1f}s"
+                    )
                 
             except asyncio.CancelledError:
                 break
