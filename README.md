@@ -2,42 +2,35 @@
 ### *Autonomous Market-Making for Prediction Markets*
 
 > [!TIP]
-> **Recommended for Stability**: [spike_bot.py](spike_bot.py) is a single-file implementation that consolidates the complex multi-module architecture into a deterministic, safety-first loop. It is less prone to race conditions and easier to audit.
+> **Recommended for Production**: [official_spike_bot.py](official_spike_bot.py) is the state-of-the-art implementation. It combines the deterministic "Spike" strategy with official features like **Automatic Winnings Claiming**, **Market Rollover**, and **Gasless Permits**.
 
 ---
 
-## 🧩 Spike Bot (Single-File Implementation)
+## 🧩 Spike Bot (Official Architecture)
 
-The `spike_bot.py` script is designed for maximum reliability and ease of use. It reuses the hardened `TurbineAdapter` while keeping all trading logic in one place.
+The `official_spike_bot.py` script is the production-ready evolution of the Spike strategy. It follows the official Turbine bot template while retaining our hardened risk controls.
 
 ### Features
-- **Deterministic Loop**: Connect -> Subscribe -> (Poll -> Calc -> Check -> Trade) -> Sleep.
-- **Strict Safety**: Fails closed if the WebSocket feed is stale (>30s) or inventory limits are reached.
-- **Probe Mode**: Verify connectivity and data flow without placing any orders.
+- **Deterministic 2s Loop**: Connect -> Subscribe -> (Poll -> Calc -> Check -> Trade) -> Sleep.
+- **Auto-Winnings Claim**: Redims profits automatically from resolved markets.
+- **Auto-Rollover**: Seemlessly switches to new 15-minute quick markets.
+- **Gasless Trading**: Integrated USDC permit signing for zero-friction execution.
+- **Rate Limit Safety**: Inter-request delays (0.2s/0.5s) to smooth API bursts.
+- **Strict Margins**: Wide 0.40 spread and 10s data freshness gate.
 
 ### Usage
 
-1. **Connectivity Probe (Safe)**:
+1. **Verify Credentials**: Ensure `.env` has your private key.
+2. **Run Live Bot**:
    ```bash
-   python spike_bot.py --probe
-   ```
-   *Runs for 30s, logs WebSocket messages, and exits. Never trades.*
-
-2. **Dry Run (Log Only)**:
-   ```bash
-   python spike_bot.py
-   ```
-   *Full strategy simulation. Logs intended actions but does not call the placement API.*
-
-3. **Live Trading**:
-   ```bash
-   TRADING_ENABLED=true python spike_bot.py
+   python official_spike_bot.py
    ```
 
 ### Configuration
-- **DRY_RUN**: `true` (default) | `false`
-- **TRADING_ENABLED**: `false` (default) | `true`
-- **TURBINE_MAX_DATA_AGE_S**: `30.0` (default)
+Tuned directly inside the script for maximum reliability:
+- **Base Spread**: `0.40`
+- **Tick Interval**: `2.0s`
+- **Max Data Age**: `10.0s`
 
 ---
 

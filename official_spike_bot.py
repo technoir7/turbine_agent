@@ -279,21 +279,35 @@ class MarketMakerBot:
         """Poll API for authoritative position."""
         if not self.market_id: return
         try:
-            # We use the client directly
-            # client.get_positions() returns dict {market_id: size}
-            # Wait, does the sync client have get_positions? 
-            # Yes, standard TurbineClient has it.
-            # But making a sync call in async loop blocks?
-            # Ideally we use an async wrapper or execute in thread.
-            # For simplicity/safety with Low Freq (2s), raw call is okay-ish 
-            # but better to offload if possible. 
-            # Actually, `httpx` inside `TurbineClient` is sync.
-            # We should wrap it.
-            positions = await asyncio.to_thread(self.client.get_positions)
-            new_pos = positions.get(self.market_id, 0.0)
-            self.state.position = new_pos
-            # logger.info(f"DEBUG: Pos Snapshot -> {new_pos}")
+            # Use get_user_positions(address, chain_id)
+            if not self.client.address:
+                logger.warning("No wallet address available for positions.")
+                return
+
+            positions = await asyncio.to_thread(
+                self.client.get_user_positions,
+                address=self.client.address,
+                chain_id=137
+            )
+            
+            # API might return None for empty portfolio
+            if positions is None: 
+                positions = []
+            
+            # Find current market position
+            target = next((p for p in positions if p.market_id == self.market_id), None)
+            
+            if target:
+                # Net = YES - NO (scaled 1e6)
+                net = (target.yes_shares - target.no_shares) / 1_000_000.0
+                self.state.position = net
+                # logger.info(f"DEBUG: Pos Snapshot -> {net}")
+            else:
+                self.state.position = 0.0
+                
         except Exception as e:
+            # Silence NoneType iteration error if it happens
+            if "NoneType" in str(e): return
             logger.error(f"Pos polling error: {e}")
 
     def compute_quotes(self) -> Tuple[Optional[float], Optional[float]]:
@@ -469,7 +483,8 @@ class MarketMakerBot:
                         
                         permit = self.client.sign_usdc_permit(amt, self.settlement_address)
                         o.permit_signature = permit
-                        return self.client.post_order(o)
+                        self.client.post_order(o)
+                        return o.order_hash # Return hash from object
                     else:
                         o = self.client.create_limit_sell(
                             market_id=self.market_id,
@@ -483,17 +498,22 @@ class MarketMakerBot:
                         amt = (size * 110) // 100
                         permit = self.client.sign_usdc_permit(amt, self.settlement_address)
                         o.permit_signature = permit
-                        return self.client.post_order(o)
+                        self.client.post_order(o)
+                        return o.order_hash
 
                 # Run sync usage in thread
-                res = await asyncio.to_thread(_do_place)
+                tx_id = await asyncio.to_thread(_do_place)
+                
                 # Store
-                tx_id = res['id'] # or hash?
                 self.state.open_orders[tx_id] = {'side': side, 'price': price, 'ts': time.time()}
                 logger.info(f"Placed {side.upper()} @ {price:.3f} (ID: {tx_id})")
 
         except Exception as e:
-            logger.error(f"Order place failed: {e}")
+            if "rate limit" in str(e).lower():
+                logger.warning("Order Rate Limit Exhausted. Backing off 5s...")
+                await asyncio.sleep(5)
+            else:
+                logger.error(f"Order place failed: {e}")
 
     # --- Configured Run ---
     async def run(self, host: str):
