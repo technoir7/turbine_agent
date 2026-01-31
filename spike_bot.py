@@ -388,36 +388,22 @@ class TurbineSpike:
         try:
             type_name = type(msg).__name__
             
-            if type_name == 'BookDeltaEvent':
-                # msg (BookDeltaEvent) has: price, size, side (Side.BID/ASK)
-                # We need to update our list of tuples.
-                # Simplification: Fetch snapshot on first connect? 
-                # Or just build from deltas if it's an OrderBookUpdate (snapshot-like)?
-                # TurbineAdapter's _translate sends individual updates.
+            if type_name == 'BookSnapshotEvent':
+                # msg has: bids=[(price, size)...], asks=[(price, size)...]
+                # Ensure sorted
+                self.state.bids = sorted(msg.bids, key=lambda x: x[0], reverse=True)
+                self.state.asks = sorted(msg.asks, key=lambda x: x[0])
+                self.state.last_update_ts = time.time()
                 
-                # IMPORTANT: For a spike bot, maintaining a perfect book from deltas is complex.
-                # However, looking at adapter source, OrderBookUpdate usually gives a FULL snapshot of top levels.
-                # But the adapter breaks it into individual deltas.
-                # This makes the spike bot harder.
-                
-                # HACK: For the spike bot, we will just store the logical "best" from what we see
-                # OR we will bypass the translation and read the raw message if possible.
-                # But we can't easily bypass. state management is needed.
-                
-                # Let's apply the delta.
-                # msg.side is Side enum.
-                
+            elif type_name == 'BookDeltaEvent':
+                # Kept for backward compatibility or diff modes
                 price = msg.price
                 size = msg.size
                 is_bid = (msg.side.name == 'BID') # Check enum name
                 
                 target_list = self.state.bids if is_bid else self.state.asks
                 
-                # Remove existing price level
-                # (Price is float, use epsilon?)
-                # Turbine price is normalized already by adapter (check adapter logic).
-                # Actually adapter normalizes to float.
-                
+                # Update list (inefficient but safe for spike bot)
                 new_list = [x for x in target_list if abs(x[0] - price) > 1e-9]
                 if size > 0:
                     new_list.append((price, size))
