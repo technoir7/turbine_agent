@@ -19,7 +19,7 @@ exchange:
 
 strategy:
   # Market Making
-  base_spread: 0.30      # WIDENED to 0.30 for safety/profitability
+  base_spread: 0.40      # WIDENED FURTHER to 0.40 for safety
   min_price: 0.01
   max_price: 0.99        # RESTORED
   
@@ -59,7 +59,7 @@ loop:
   tick_interval_ms: 2000      # SLOWED to 2000ms to allow burst smoothing
   reconcile_interval_ms: 2000 # Matching tick
   replace_threshold: 0.001
-  max_quote_age_seconds: 30.0
+  max_quote_age_seconds: 10.0 # REDUCED to 10s to prevent stale quotes
 
 logging:
   level: "INFO"
