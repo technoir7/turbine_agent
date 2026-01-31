@@ -102,6 +102,7 @@ class TurbineSpike:
              self.dry_run = True
 
         self.max_age = float(os.environ.get("TURBINE_MAX_DATA_AGE_S", 30.0))
+        self.last_poll_ts = 0.0 # Force poll on start
         
         if self.dry_run:
             logger.warning("DRY RUN ACTIVE. No real orders will be placed.")
