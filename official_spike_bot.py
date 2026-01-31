@@ -66,6 +66,7 @@ CONFIG = {
     "risk": {
         "max_inventory_units": 1000,
         "max_portfolio_exposure": 10000.0,
+        "max_wallet_risk_pct": 0.20, # Max 20% of wallet value at risk
     },
     "loop": {
         "tick_interval_ms": 2000,       # 2s interval (Rate Limit Safe)
@@ -151,6 +152,10 @@ class MarketState:
     trailing_low: float = 1.0       # Low water mark (for Shorts)
     stop_triggered: bool = False
     stop_cooldown_ts: float = 0.0
+
+    # Portfolio Risk
+    wallet_balance: float = 0.0     # USDC Balance
+    last_balance_ts: float = 0.0
 
 # ============================================================
 # DATA RECORDER
@@ -239,6 +244,72 @@ class InventoryUrgencyManager:
             
         self.previous_regime = current_regime
         return dangerous
+
+    async def fetch_usdc_balance(self):
+        """Fetch USDC balance from RPC."""
+        # Rate limit friendly (every 10s)
+        if time.time() - self.state.last_balance_ts < 10: return
+        
+        try:
+            # Polygon USDC (Native)
+            usdc_address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            wallet = self.client.address[2:]
+            
+            # Simple JSON-RPC call
+            # Using a public aggregated RPC or user provided
+            rpc_url = os.environ.get("TURBINE_RPC_URL", "https://polygon-rpc.com")
+            
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{
+                    "to": usdc_address,
+                    "data": f"0x70a08231000000000000000000000000{wallet}" # balanceOf
+                }, "latest"],
+                "id": 1
+            }
+            
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                resp = await http.post(rpc_url, json=payload)
+                data = resp.json()
+                
+                if "result" in data:
+                    hex_val = data["result"]
+                    if hex_val:
+                        val = int(hex_val, 16)
+                        self.state.wallet_balance = val / 1_000_000.0 # 6 decimals
+                        self.state.last_balance_ts = time.time()
+                        # logger.info(f"Wallet Balance: ${self.state.wallet_balance:.2f}")
+                        
+        except Exception as e:
+            logger.warning(f"Balance fetch failed: {e}")
+
+    def check_risk_limits(self, potential_new_exposure: float = 0.0) -> bool:
+        """Return True if within limits, False if blocked."""
+        # 1. Calculate Current Exposure
+        # Inventory Value (Abs position)
+        inv_risk = abs(self.state.position) # 1 share ~= $1 max risk roughly
+        
+        # Open Bids Value
+        orders_risk = 0.0
+        for o in self.state.open_orders.values():
+            if o['side'] == 'buy':
+                orders_risk += o['size'] * o['price']
+                
+        total_risk = inv_risk + orders_risk + potential_new_exposure
+        
+        # 2. Compare to Wallet
+        balance = self.state.wallet_balance
+        if balance <= 0: return True # Can't enforce if unknown
+        
+        limit_pct = CONFIG['risk']['max_wallet_risk_pct']
+        allowed = balance * limit_pct
+        
+        if total_risk > allowed:
+            logger.warning(f"RISK BLOCKED: Exposure ${total_risk:.2f} > Limit ${allowed:.2f} ({limit_pct*100}% of ${balance:.2f})")
+            return False
+            
+        return True
 
 class TimeDecayManager:
     """Manages pricing urgency and position limits based on time."""
@@ -737,8 +808,9 @@ class MarketMakerBot:
             start_ts = time.time()
             try:
                 if self.market_id:
-                    # 1. Update (Pos + Time)
+                    # 1. Update (Pos + Time + Balance)
                     await self.fetch_position_snapshot()
+                    await self.fetch_usdc_balance()
                     
                     mid = 0.5
                     if self.state.bids and self.state.asks:
@@ -774,7 +846,8 @@ class MarketMakerBot:
                         f"Inv={self.state.position:.1f} "
                         f"Urg={pricing['urgency']} "
                         f"Spr={pricing['spread']:.3f} "
-                        f"Bid={pricing['bid']:.2f} Ask={pricing['ask']:.2f}"
+                        f"Bid={pricing['bid']:.2f} Ask={pricing['ask']:.2f} "
+                        f"Bal=${self.state.wallet_balance:.2f}"
                     )
                     self.recorder.log_tick(
                         self.market_id, mid, regime_str, self.state.position, 
@@ -806,8 +879,11 @@ class MarketMakerBot:
                     
                     # Place Limits
                     if allow_bid:
-                        self.tracker.record_order()
-                        await self._converge_side('buy', pricing['bid'])
+                        # Risk Check
+                        cost = pricing['bid'] * 1 # Unit cost roughly per share
+                        if self.check_risk_limits(cost):
+                           self.tracker.record_order()
+                           await self._converge_side('buy', pricing['bid'])
                     elif self.state.open_orders:
                         # Cancel existing bids if forbidden?
                         # For now, let smart replacement handle or clean sweep
