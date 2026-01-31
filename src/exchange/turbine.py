@@ -860,7 +860,8 @@ class TurbineAdapter(ExchangeAdapter):
             
         except TypeError as te:
             if "'NoneType' object is not iterable" in str(te):
-                logger.warning("get_positions: API returned None (no positions?), treating as empty.")
+                # This is normal for new accounts or empty portfolios on some endpoints
+                logger.debug("get_positions: API returned None (no positions?), treating as empty.")
                 return {}
             logger.error(f"Failed to fetch positions (TypeError): {te}")
             return {}

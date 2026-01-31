@@ -616,3 +616,4 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 4. **Integration Probe**: Updated `connectivity_probe.py` to run a full `Place -> Verify (List) -> Cancel -> Verify (Gone)` lifecycle test.
 6. **Canonical Cancel**: Enforced strict `cancel_order` logic using `market_id` and `side` (mapped from int->str->Enum) to satisfy API requirements.
 7. **Two-Way Trade Verification**: specific `connectivity_probe.py` update to place/verify/cancel BOTH Buy and Sell orders to prove side mapping correctness.
+8. **Log Cleanup**: Silenced "API returned None" warning for positions to DEBUG level (normal for empty portfolios).
