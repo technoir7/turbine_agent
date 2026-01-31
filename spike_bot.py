@@ -480,9 +480,12 @@ class TurbineSpike:
         logger.info("Starting Main Loop...")
         try:
             while self.running:
-                # A. Rollover Check & State Sync
-                # (Simplified: every 10s check if market ID changed)
-                if int(time.time()) % 10 == 0:
+                # A. Rollover & State Sync (Interval based)
+                now = time.time()
+                if now - self.last_poll_ts > 10.0:
+                     self.last_poll_ts = now
+                     
+                     # 1. Fetch Market
                      latest = await self._fetch_active_market()
                      if latest and latest != self.market_id:
                          logger.info(f"\n{'='*40}\nROLLOVER DETECTED\nOld: {self.market_id}\nNew: {latest}\n{'='*40}\n")
@@ -490,16 +493,16 @@ class TurbineSpike:
                          self.market_id = latest
                          await self.adapter.subscribe_markets([self.market_id])
                          self.state = MarketState() # Reset
-                         # Re-verify data flow on switch?
                      
-                     # Update Position
+                     # 2. Update Position
                      self.state.position = await self._fetch_position()
+                     logger.info(f"DEBUG: Position Updated -> {self.state.position} (Market: {self.market_id})")
                 
                 # B. Logic
                 await self.reconcile()
                 
                 # C. Heartbeat Log (Reduced frequency: 60s)
-                if int(time.time()) % 60 == 0:
+                if int(now) % 60 == 0:
                     mid = "?"
                     if self.state.bids and self.state.asks:
                          mid = f"{ (self.state.bids[0][0] + self.state.asks[0][0])/2 :.3f}"
