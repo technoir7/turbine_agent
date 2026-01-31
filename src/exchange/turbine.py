@@ -659,18 +659,26 @@ class TurbineAdapter(ExchangeAdapter):
             # Submit the order
             result = self._rest_client.post_order(signed_order)
             order_hash = result.get('orderHash', signed_order.order_hash)
-            matches = result.get('matches', [])
             
-            logger.info(f"Order placed: {order_hash} (matches: {len(matches)})")
+            # matches can be a list or an int count depending on API version
+            matches_raw = result.get('matches')
+            if isinstance(matches_raw, int):
+                match_count = matches_raw
+            elif isinstance(matches_raw, list):
+                match_count = len(matches_raw)
+            else:
+                match_count = 0
+            
+            logger.info(f"Order placed: {order_hash} (matches: {match_count})")
             
             # TRUTH CHECK: Updated to verify_order_exists (list based)
             # Only verify if NO matches (if matches exist, it might be filled/gone already)
-            if not matches:
+            if match_count == 0:
                 is_verified = await self._verify_order_exists(order_hash)
                 if not is_verified:
                     logger.error(f"CRITICAL: Order {order_hash} placed (unmatched) but NOT found in API verification!")
             else:
-                 logger.info(f"Order {order_hash} matched immediately ({len(matches)} fills). Skipping open order check.")
+                 logger.info(f"Order {order_hash} matched immediately ({match_count} fills). Skipping open order check.")
             
             return order_hash
             
