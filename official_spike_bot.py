@@ -187,7 +187,9 @@ class MarketMakerBot:
         for order_id in list(self.state.open_orders.keys()):
             try:
                 # We store order_hash as key
-                self.client.cancel_order(market_id=market_id, order_id=order_id)
+                # We store order_hash as key
+                self.client.cancel_order(order_hash=order_id, market_id=market_id)
+                await asyncio.sleep(0.1) # Rate limit protect
                 await asyncio.sleep(0.1) # Rate limit protect
             except Exception as e:
                 logger.warning(f"Failed to cancel order {order_id}: {e}")
@@ -478,7 +480,7 @@ class MarketMakerBot:
                             outcome=outcome,
                             price=price_int,
                             size=size,
-                            expiration=int(time.time() + 60),
+                            expiration=int(time.time() + 120),
                             settlement_address=self.settlement_address
                         )
                         # 2. Permit
@@ -502,7 +504,7 @@ class MarketMakerBot:
                             outcome=outcome,
                             price=price_int,
                             size=size,
-                            expiration=int(time.time() + 60),
+                            expiration=int(time.time() + 120),
                             settlement_address=self.settlement_address
                         )
                         # Sell permit: just size + margin (for splitting)
