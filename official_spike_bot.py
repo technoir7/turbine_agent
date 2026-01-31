@@ -422,10 +422,14 @@ class MarketMakerBot:
             logger.info(f"Replacing {side.upper()}: Drift {drift:.4f} or Age {age:.1f}s")
             # Cancel
             try:
-                self.client.cancel_order(market_id=self.market_id, order_id=existing_id)
+                # We use stored order_hash as index
+                self.client.cancel_order(order_hash=existing_id, market_id=self.market_id)
+            except Exception as e:
+                logger.warning(f"Cancel failed for {existing_id}: {e}")
+            finally:
+                # Always remove strict tracking. If it failed, it's gone or we can't manage it anyway.
+                # Better to clear it than to loop infinitely creating duplicates.
                 self.state.open_orders.pop(existing_id, None)
-            except Exception:
-                pass # Already gone?
             
             await asyncio.sleep(0.2) # Burst smoothing
             await self._place_limit_order(side, price)
