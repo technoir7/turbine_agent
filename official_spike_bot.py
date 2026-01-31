@@ -11,8 +11,9 @@ import re
 import time
 import json
 import logging
+from collections import deque
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 from dataclasses import dataclass, field
 
 # Third-party imports
@@ -140,6 +141,7 @@ class MarketState:
     last_update_ts: float = 0.0
     position: float = 0.0 
     open_orders: Dict[str, dict] = field(default_factory=dict) # client_id/hash -> Order Info
+    price_history: deque = field(default_factory=lambda: deque(maxlen=30)) # For SMA-30 trend detection
 
 # ============================================================
 # BOT LOGIC
@@ -151,7 +153,6 @@ class MarketMakerBot:
         self.client = client
         self.market_id: str | None = None
         self.settlement_address: str | None = None
-        self.contract_address: str | None = None 
         self.contract_address: str | None = None 
         self.start_price: int = 0
         self.end_time: int = 0 # Unix TS
@@ -325,9 +326,28 @@ class MarketMakerBot:
                 self.state.position = 0.0
                 
         except Exception as e:
-            # Silence NoneType iteration error if it happens
-            if "NoneType" in str(e): return
-            logger.error(f"Pos polling error: {e}")
+            logger.warning(f"Pos Fetch Error: {e}")
+            self.state.position = 0.0
+
+    def _get_regime_skew(self) -> float:
+        """Calculate skew based on Bull/Bear regime (SMA-30)."""
+        history = self.state.price_history
+        if len(history) < 10: 
+            return 0.0 # Not enough data
+        
+        sma = sum(history) / len(history)
+        current = history[-1]
+        
+        # Threshold could be configurable, using 0.0 for now (simple above/below)
+        # Bullish: Price > Average -> We want to be Long
+        if current > sma:
+            return 0.05 # Add 5 cents skew (Shift quotes UP)
+            
+        # Bearish: Price < Average -> We want to be Short
+        if current < sma:
+            return -0.05 # Subtract 5 cents skew (Shift quotes DOWN)
+            
+        return 0.0
 
     def compute_quotes(self) -> Tuple[Optional[float], Optional[float]]:
         """Calculate implementation of Spike Strategy."""
@@ -384,11 +404,16 @@ class MarketMakerBot:
         if pos <= -max_pos:
             allow_ask = False
             
-        skew = -1 * (pos / max_pos) * strat['skew_factor'] * urgency_mult
+            
+        # Skew Calculation
+        inv_skew = -1 * (pos / max_pos) * strat['skew_factor'] * urgency_mult
+        regime_skew = self._get_regime_skew()
+        
+        total_skew = inv_skew + regime_skew
 
         # Quote
-        bid_p = mid - base_half + skew
-        ask_p = mid + base_half + skew
+        bid_p = mid - base_half + total_skew
+        ask_p = mid + base_half + total_skew
 
         # Clamp
         bid_p = max(strat['min_price'], min(bid_p, strat['max_price']))
@@ -417,8 +442,17 @@ class MarketMakerBot:
                     # 3. Log Heartbeat
                     mid_str = "?"
                     if self.state.bids and self.state.asks:
-                        mid_str = f"{(self.state.bids[0][0]+self.state.asks[0][0])/2:.3f}"
-                    logger.info(f"Tick: Mid={mid_str} Inv={self.state.position:.1f} Bid={bid} Ask={ask}")
+                        mid = (self.state.bids[0][0]+self.state.asks[0][0])/2
+                        mid_str = f"{mid:.3f}"
+                        # Track history
+                        self.state.price_history.append(mid)
+                        
+                    regime_str = "NEUT"
+                    r_skew = self._get_regime_skew()
+                    if r_skew > 0: regime_str = "BULL"
+                    elif r_skew < 0: regime_str = "BEAR"
+                    
+                    logger.info(f"Tick: Mid={mid_str} [{regime_str}] Inv={self.state.position:.1f} Bid={bid} Ask={ask}")
 
                     # 4. Reconcile/Place
                     if bid and ask:
