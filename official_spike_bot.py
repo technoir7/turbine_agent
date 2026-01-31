@@ -223,8 +223,8 @@ class InventoryUrgencyManager:
             offset_multiplier = 0.20
             spread_multiplier = 0.1
         
-        # Tier 6: Panic (T-30s)
-        if seconds_remaining < 30 and abs(inventory) > 0:
+        # Tier 6: Panic (T-90s) - CHANGED from 30s for safety
+        if seconds_remaining < 90 and abs(inventory) > 0:
             urgency_level = "PANIC"
             offset_multiplier = 0.50
             spread_multiplier = 0.05
@@ -245,71 +245,7 @@ class InventoryUrgencyManager:
         self.previous_regime = current_regime
         return dangerous
 
-    async def fetch_usdc_balance(self):
-        """Fetch USDC balance from RPC."""
-        # Rate limit friendly (every 10s)
-        if time.time() - self.state.last_balance_ts < 10: return
-        
-        try:
-            # Polygon USDC (Native)
-            usdc_address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-            wallet = self.client.address[2:]
-            
-            # Simple JSON-RPC call
-            # Using a public aggregated RPC or user provided
-            rpc_url = os.environ.get("TURBINE_RPC_URL", "https://polygon-rpc.com")
-            
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "eth_call",
-                "params": [{
-                    "to": usdc_address,
-                    "data": f"0x70a08231000000000000000000000000{wallet}" # balanceOf
-                }, "latest"],
-                "id": 1
-            }
-            
-            async with httpx.AsyncClient(timeout=5.0) as http:
-                resp = await http.post(rpc_url, json=payload)
-                data = resp.json()
-                
-                if "result" in data:
-                    hex_val = data["result"]
-                    if hex_val:
-                        val = int(hex_val, 16)
-                        self.state.wallet_balance = val / 1_000_000.0 # 6 decimals
-                        self.state.last_balance_ts = time.time()
-                        # logger.info(f"Wallet Balance: ${self.state.wallet_balance:.2f}")
-                        
-        except Exception as e:
-            logger.warning(f"Balance fetch failed: {e}")
 
-    def check_risk_limits(self, potential_new_exposure: float = 0.0) -> bool:
-        """Return True if within limits, False if blocked."""
-        # 1. Calculate Current Exposure
-        # Inventory Value (Abs position)
-        inv_risk = abs(self.state.position) # 1 share ~= $1 max risk roughly
-        
-        # Open Bids Value
-        orders_risk = 0.0
-        for o in self.state.open_orders.values():
-            if o['side'] == 'buy':
-                orders_risk += o['size'] * o['price']
-                
-        total_risk = inv_risk + orders_risk + potential_new_exposure
-        
-        # 2. Compare to Wallet
-        balance = self.state.wallet_balance
-        if balance <= 0: return True # Can't enforce if unknown
-        
-        limit_pct = CONFIG['risk']['max_wallet_risk_pct']
-        allowed = balance * limit_pct
-        
-        if total_risk > allowed:
-            logger.warning(f"RISK BLOCKED: Exposure ${total_risk:.2f} > Limit ${allowed:.2f} ({limit_pct*100}% of ${balance:.2f})")
-            return False
-            
-        return True
 
 class TimeDecayManager:
     """Manages pricing urgency and position limits based on time."""
@@ -399,7 +335,7 @@ class TimeAwarePricingEngine:
         return {
             "bid": bid, "ask": ask, "spread": ask-bid,
             "urgency": urg_level, "time_urg": time_urg,
-            "max_pos": max_pos, "use_market": use_market
+            "max_pos": max_pos, "use_market_orders": use_market
         }
 
 class PerformanceTracker:
@@ -416,7 +352,31 @@ class PerformanceTracker:
     def get_report(self):
         if self.orders == 0: rate = 0.0
         else: rate = self.fills / self.orders
-        return f"FillRate={rate:.2f} ({self.fills}/{self.orders}) Flips={self.regime_flips}"
+        return f"FillRate={rate:.1%} ({self.fills}/{self.orders}) Flips={self.regime_flips}"
+
+class AdaptiveSpreadManager:
+    """Dynamically adjusts spread based on fill rate."""
+    def __init__(self, base_spread=0.04):
+        self.base_spread = base_spread
+        self.current_spread = base_spread
+        self.min_spread = 0.01
+        self.max_spread = 0.06
+        
+    def get_spread(self, fill_rate: float, time_since_fill: float) -> float:
+        # If very stale (>60s) or low fill rate, tighten spread
+        if time_since_fill > 60 or fill_rate < 0.20:
+             # Tighten aggressivley
+             self.current_spread = max(self.min_spread, self.base_spread * 0.5)
+        elif fill_rate < 0.40:
+             # Moderate tightening
+             self.current_spread = max(self.min_spread, self.base_spread * 0.75)
+        else:
+             # Healthy
+             self.current_spread = self.base_spread
+             
+        return self.current_spread
+
+# ============================================================
 
 # ============================================================
 # BOT LOGIC
@@ -432,14 +392,27 @@ class MarketMakerBot:
         self.start_price: int = 0
         self.end_time: int = 0 # Unix TS
         
+        self.recorder = CSVLogger()
         self.urgency_manager = InventoryUrgencyManager()
         self.tracker = PerformanceTracker()
+        self.adaptive_spread = AdaptiveSpreadManager(base_spread=CONFIG['strategy']['base_spread'])
         self.time_decay = TimeDecayManager()
+        # Pass adaptive spread instance or we adjust base_spread dynamically?
+        # We will adjust effectively in the loop
         self.engine = TimeAwarePricingEngine(self.urgency_manager, self.time_decay, base_spread=CONFIG['strategy']['base_spread'])
         
         # Strategy State
         self.state = MarketState()
         self.running = True
+
+        # Performance Stats (New)
+        self.stats = {
+            'placed': 0,
+            'filled': 0,
+            'cancelled': 0
+        }
+        self._last_summary_ts = 0.0
+        self.last_fill_ts = 0.0
         
         # Winnings Tracking
         self.traded_markets: Dict[str, str] = {}  # market_id -> contract_address
@@ -608,6 +581,111 @@ class MarketMakerBot:
         except Exception as e:
             logger.warning(f"Pos Fetch Error: {e}")
             self.state.position = 0.0
+            
+    async def fetch_usdc_balance(self):
+        """Fetch USDC balance from RPC."""
+        # Rate limit friendly (every 10s)
+        if time.time() - self.state.last_balance_ts < 10: return
+        
+        try:
+            # Polygon USDC (Native)
+            usdc_address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            if not self.client.address: return
+            wallet = self.client.address[2:]
+            
+            # Simple JSON-RPC call
+            # Using a public aggregated RPC or user provided
+            rpc_url = os.environ.get("TURBINE_RPC_URL", "https://polygon-rpc.com")
+            
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{
+                    "to": usdc_address,
+                    "data": f"0x70a08231000000000000000000000000{wallet}" # balanceOf
+                }, "latest"],
+                "id": 1
+            }
+            
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                resp = await http.post(rpc_url, json=payload)
+                data = resp.json()
+                
+                if "result" in data:
+                    hex_val = data["result"]
+                    if hex_val:
+                        val = int(hex_val, 16)
+                        self.state.wallet_balance = val / 1_000_000.0 # 6 decimals
+                        self.state.last_balance_ts = time.time()
+                        
+        except Exception as e:
+            logger.warning(f"Balance fetch failed: {e}")
+
+    def check_risk_limits(self, potential_new_exposure: float = 0.0, side: str = None) -> bool:
+        """Return True if within limits, False if blocked."""
+        # 1. Calculate Current Exposure
+        # Inventory Value (Abs position)
+        inv_risk = abs(self.state.position) 
+        
+        # Open Bids Value
+        orders_risk = 0.0
+        for o in self.state.open_orders.values():
+            if o['side'] == 'buy':
+                # If we are placing a NEW BUY, assume we replace the OLD BUY.
+                # So don't count the old buy in the risk check.
+                if side == 'buy': continue
+                
+                # size is in units of 1e6 (1 share = 1_000_000)
+                # We need dollar exposure: (size/1e6) * price
+                orders_risk += (o['size'] / 1_000_000.0) * o['price']
+                
+        total_risk = inv_risk + orders_risk + potential_new_exposure
+        
+        # 2. Compare to Wallet
+        balance = self.state.wallet_balance
+        if balance <= 0: return True 
+        
+        limit_pct = CONFIG['risk']['max_wallet_risk_pct']
+        allowed = balance * limit_pct
+        
+        if total_risk > allowed:
+            logger.warning(f"RISK BLOCKED: Exposure ${total_risk:.2f} > Limit ${allowed:.2f} ({limit_pct*100}% of ${balance:.2f})")
+            return False
+            
+        return True
+
+    def calculate_order_size(self, seconds_remaining: float, inventory: float) -> int:
+        """Calculate decreasing order size based on time."""
+        # 3 Shares early, 2 mid, 1 late
+        if seconds_remaining > 600: base = 3
+        elif seconds_remaining > 300: base = 2
+        else: base = 1
+        
+        # Adjust for Inventory (Don't add to losing side aggresively?)
+        # For now, keep simple symmetric
+        return int(base * 1_000_000)
+
+    def _log_performance_dashboard(self):
+        """Log stats every 60s."""
+        if time.time() - self._last_summary_ts > 60:
+            self._last_summary_ts = time.time()
+            report = self.tracker.get_report()
+            logger.info("=" * 60)
+            logger.info(f"📊 DASHBOARD: {report}")
+            logger.info(f"   Stats: {self.stats}")
+            logger.info(f"   Spread: {self.adaptive_spread.current_spread:.3f}")
+            logger.info("=" * 60)
+
+    def calculate_order_size(self, seconds_remaining: float, inventory: float) -> int:
+        """Calculate decreasing order size based on time."""
+        # 3 Shares early, 2 mid, 1 late
+        if seconds_remaining > 600: base = 3
+        elif seconds_remaining > 300: base = 2
+        else: base = 1
+        
+        # Adjust for Inventory (Don't add to losing side aggresively?)
+        # For now, keep simple symmetric
+        return int(base * 1_000_000)
 
     def _get_regime_skew(self) -> float:
         """Calculate skew based on Bull/Bear regime (SMA-30)."""
@@ -826,16 +904,28 @@ class MarketMakerBot:
                     # 2. Pricing Engine
                     time_left = max(0, self.end_time - time.time())
                     
-                    if time_left < 30:
-                        # EMERGENCY EXIT
+                    if time_left < 90:
+                        # EMERGENCY EXIT (T-90s)
                         if self.state.open_orders:
                             await self.cancel_all_orders(self.market_id)
                         if abs(self.state.position) > 0.1:
-                            logger.critical(f"T-30s PANIC DUMP: {self.state.position}")
+                            logger.critical(f"T-{int(time_left)}s PANIC DUMP: {self.state.position}")
                             side = 'sell' if self.state.position > 0 else 'buy'
                             await self.panic_close(side)
                         continue
 
+                    # Performance & Adaptive Spread
+                    self._log_performance_dashboard()
+                    
+                    fill_rate = 0.0
+                    if self.stats['placed'] > 0: 
+                        fill_rate = self.stats['filled'] / self.stats['placed']
+                    
+                    time_since_fill = time.time() - self.last_fill_ts
+                    # Update engine base spread dynamically
+                    current_spread = self.adaptive_spread.get_spread(fill_rate, time_since_fill)
+                    self.engine.base_spread = current_spread
+                    
                     pricing = self.engine.calculate_prices(
                         mid, self.state.position, regime_str, time_left
                     )
@@ -880,10 +970,12 @@ class MarketMakerBot:
                     # Place Limits
                     if allow_bid:
                         # Risk Check
-                        cost = pricing['bid'] * 1 # Unit cost roughly per share
-                        if self.check_risk_limits(cost):
+                        cost = pricing['bid'] * 1 
+                        if self.check_risk_limits(cost, side='buy'):
                            self.tracker.record_order()
-                           await self._converge_side('buy', pricing['bid'])
+                           # Sizing
+                           size = self.calculate_order_size(time_left, inv)
+                           await self._converge_side('buy', pricing['bid'], size=size)
                     elif self.state.open_orders:
                         # Cancel existing bids if forbidden?
                         # For now, let smart replacement handle or clean sweep
@@ -891,7 +983,8 @@ class MarketMakerBot:
                         
                     if allow_ask:
                         self.tracker.record_order()
-                        await self._converge_side('sell', pricing['ask'])
+                        size = self.calculate_order_size(time_left, inv)
+                        await self._converge_side('sell', pricing['ask'], size=size)
                     
                     # 5. Safety / Kill Switch
                     # If PnL < -2.00 (Requires PnL tracking, not impl yet, skipping)
@@ -908,7 +1001,7 @@ class MarketMakerBot:
             sleep_time = max(0.1, (CONFIG['loop']['tick_interval_ms'] / 1000.0) - elapsed)
             await asyncio.sleep(sleep_time)
 
-    async def _converge_side(self, side: str, price: float):
+    async def _converge_side(self, side: str, price: float, size: int = ORDER_SIZE):
         # Identify existing order for this side
         existing_id = None
         existing_info = None
@@ -920,16 +1013,19 @@ class MarketMakerBot:
                 break
         
         if not existing_id:
-            await self._place_limit_order(side, price)
+            await self._place_limit_order(side, price, size=size)
             return
 
         # Drift Check
         old_price = existing_info['price']
         drift = abs(old_price - price)
         age = time.time() - existing_info['ts']
+        # Check size mismatch
+        current_size = existing_info.get('size', ORDER_SIZE)
+        size_changed = (current_size != size)
         
-        if drift > CONFIG['loop']['replace_threshold'] or age > CONFIG['loop']['max_quote_age_seconds']:
-            logger.info(f"Replacing {side.upper()}: Drift {drift:.4f} or Age {age:.1f}s")
+        if drift > CONFIG['loop']['replace_threshold'] or age > CONFIG['loop']['max_quote_age_seconds'] or size_changed:
+            logger.info(f"Replacing {side.upper()}: Drift {drift:.4f} or Age {age:.1f}s or Size {current_size}->{size}")
             # Cancel
             try:
                 # We use stored order_hash as index
@@ -945,36 +1041,14 @@ class MarketMakerBot:
                 self.state.open_orders.pop(existing_id, None)
             
             await asyncio.sleep(0.2) # Burst smoothing
-            await self._place_limit_order(side, price)
+            await self._place_limit_order(side, price, size=size)
 
-    async def _place_limit_order(self, side: str, price: float):
+    async def _place_limit_order(self, side: str, price: float, size: int = ORDER_SIZE):
         if not self.settlement_address: return # Can't sign permit without it
         
         outcome = Outcome.YES
         # Scale to API
-        price_int = int(price * 1_000_000) # Wait, API uses 1e6 for price too? 
-        # SKILL.md says: "price: Price scaled by 1e6"
-        # spike_bot used 10000? Let me check spike_bot logic.
-        # TurbineAdapter used int(order.price * 10000). 
-        # But create_limit_buy docs say 1e6. 
-        # WAIT. 10000 * 100 = 1e6. 
-        # If price is 0.50 (50 cents) -> 500,000.
-        # spike_bot used 10k? 0.5 * 10k = 5000. That's 0.005?
-        # Let's check `spike_bot` logic one more time.
-        # Ah, Adapter said `int(order.price * 10000)`.
-        # If order.price is 0.50, result 5000.
-        # If API expects 1e6 for 1.0, then 0.50 should be 500,000.
-        # 5000 is 0.5%.
-        # Did spike_bot have a massive pricing bug?
-        # Or does Turbine use 10k scale?
-        # SKILL.md says: `price: Price scaled by 1e6`.
-        # `quick_market.start_price` is 8 decimals (BTC).
-        # Outcome tokens are binary 0-1.
-        # Usually binary options use 0-1 scale.
-        # If I use 1e6, 0.50 -> 500,000.
-        # I will use 1e6 scaling to be safe per docs.
-
-        size = ORDER_SIZE # 1e6 (1 unit)
+        price_int = int(price * 1_000_000) 
         
         try:
             # We run this in thread because it involves signing/requests
@@ -1034,9 +1108,17 @@ class MarketMakerBot:
                 # Run sync usage in thread
                 tx_id = await asyncio.to_thread(_do_place)
                 
-                # Store
-                self.state.open_orders[tx_id] = {'side': side, 'price': price, 'ts': time.time()}
-                logger.info(f"Placed {side.upper()} @ {price:.3f} (ID: {tx_id})")
+                # Store with extended stats
+                self.state.open_orders[tx_id] = {
+                    'side': side, 
+                    'price': price, 
+                    'size': ORDER_SIZE, 
+                    'ts': time.time()
+                }
+                
+                # Stats & Logging
+                self.stats['placed'] += 1
+                logger.info(f"📤 PLACED: {side.upper()} {size/1e6:.1f} @ {price:.3f} (ID: {tx_id[:8]})")
 
         except Exception as e:
             if "rate limit" in str(e).lower():
