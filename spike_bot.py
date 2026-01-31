@@ -162,6 +162,15 @@ class TurbineSpike:
             logger.error(f"Failed to fetch market: {e}")
         return None
 
+    async def _fetch_position(self) -> float:
+        """Fetch current position for active market."""
+        try:
+            positions = await self.adapter.get_positions()
+            return positions.get(self.market_id, 0.0)
+        except Exception as e:
+            logger.error(f"Pos Fetch Error: {e}")
+            return 0.0
+
     # --- Strategy Logic (Extracted) ---
     def compute_quotes(self) -> Tuple[Optional[float], Optional[float]]:
         # 1. Check Feed Freshness
@@ -468,7 +477,7 @@ class TurbineSpike:
         logger.info("Starting Main Loop...")
         try:
             while self.running:
-                # A. Rollover Check
+                # A. Rollover Check & State Sync
                 # (Simplified: every 10s check if market ID changed)
                 if int(time.time()) % 10 == 0:
                      latest = await self._fetch_active_market()
@@ -479,6 +488,9 @@ class TurbineSpike:
                          await self.adapter.subscribe_markets([self.market_id])
                          self.state = MarketState() # Reset
                          # Re-verify data flow on switch?
+                     
+                     # Update Position
+                     self.state.position = await self._fetch_position()
                 
                 # B. Logic
                 await self.reconcile()
