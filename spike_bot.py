@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
         "max_portfolio_exposure": 10000.0
     },
     "loop": {
-        "tick_interval_ms": 1000,
+        "tick_interval_ms": 2000,
         "max_quote_age_seconds": 30.0,
         "replace_threshold": 0.001
     }
