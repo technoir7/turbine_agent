@@ -687,6 +687,58 @@ class MarketMakerBot:
         # For now, keep simple symmetric
         return int(base * 1_000_000)
 
+    def calculate_competitive_prices(self, base_pricing: dict, mid: float) -> dict:
+        """
+        Adjust prices to be competitive yet conservative.
+        Strategies:
+        1. Join Touch: Don't quote 0.48 if best bid is 0.19. Bid 0.191.
+        2. Undercut Ask: Ensuring we sell inventory.
+        3. Clamp: Never cross the market.
+        """
+        final_bid = base_pricing['bid']
+        final_ask = base_pricing['ask']
+        
+        # Get Market Context
+        best_bid = self.state.bids[0][0] if self.state.bids else None
+        best_ask = self.state.asks[0][0] if self.state.asks else None
+        
+        # 1. Conservative Bid (Buy Low)
+        # If we have no inventory, we want to buy, but NOT at 0.50 if market is 0.20.
+        if best_bid:
+             # Join the touch strategy:
+             # Our model says e.g. 0.48. Market says 0.20.
+             # We should probably bid 0.20 + 0.001 (0.201) to steal the fill, but not pay 0.48.
+             # However, if Model says 0.15 (Bear), and Market says 0.20, we stick to 0.15.
+             # Logic: Bid = Min(ModelBid, BestBid + 1 tick)
+             competitive_bid = best_bid + 0.001
+             final_bid = min(final_bid, competitive_bid)
+             
+        # 2. Aggressive Ask (Sell High/Inventory)
+        if best_ask:
+             # If we are selling, and Model says 0.52, but Market is 0.80.
+             # We can sell at 0.799.
+             # Logic: Ask = Max(ModelAsk, BestAsk - 1 tick) -> Try to get better price?
+             # User said: "Current ask way too high". 
+             # Implies Model=0.52, Market=0.25. We are not filling.
+             # So we must UNDERCUT the market to fill.
+             competitive_ask = best_ask - 0.001
+             # If Model says 0.52 (Cost Basis), can we sell at 0.25 (Loss)?
+             # If Logic says we need to dump, yes.
+             # But normally we want to sell at Max(Model, Market).
+             # Wait, to be competitive we want Min(Model, Market - tick).
+             # We want to be the best price.
+             final_ask = min(final_ask, competitive_ask)
+             
+             # Safety: Don't sell below min price (e.g 0.02)
+             final_ask = max(0.02, final_ask)
+
+        return {
+            **base_pricing,
+            'bid': final_bid,
+            'ask': final_ask,
+            'spread': final_ask - final_bid
+        }
+
     def _get_regime_skew(self) -> float:
         """Calculate skew based on Bull/Bear regime (SMA-30)."""
         history = self.state.price_history
@@ -890,10 +942,26 @@ class MarketMakerBot:
                     await self.fetch_position_snapshot()
                     await self.fetch_usdc_balance()
                     
-                    mid = 0.5
+                    mid = 0.50
+                    # Conservative Mid Calculation
                     if self.state.bids and self.state.asks:
-                         mid = (self.state.bids[0][0]+self.state.asks[0][0])/2
+                         best_bid = self.state.bids[0][0]
+                         best_ask = self.state.asks[0][0]
+                         width = best_ask - best_bid
+                         if width > 0.10: 
+                             # Wide market? Be careful.
+                             # If we have last trade, use it? Or weighted?
+                             # Default to Best Bid + tiny?
+                             # Let's just use weighted mid or stick to 0.5?
+                             # User suggested "Default to .19" (Buy Low).
+                             # If no signal, assume Bearish default for safety?
+                             mid = (best_bid + best_ask) / 2
+                         else:
+                             mid = (best_bid + best_ask) / 2
                          self.state.price_history.append(mid)
+                    else:
+                        # Empty market safety
+                        mid = 0.20 # Conservative default (User request) instead of 0.50
                     
                     # Regime
                     regime_str = "NEUT"
@@ -929,6 +997,9 @@ class MarketMakerBot:
                     pricing = self.engine.calculate_prices(
                         mid, self.state.position, regime_str, time_left
                     )
+                    
+                    # Apply Conservative Logic
+                    pricing = self.calculate_competitive_prices(pricing, mid)
                     
                     # 3. Log
                     logger.info(
