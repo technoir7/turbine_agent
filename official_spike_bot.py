@@ -49,8 +49,8 @@ load_dotenv()
 # Safety Tuned Values from previous debugging
 CONFIG = {
     "strategy": {
-        "base_spread": 0.60,      # Wide spread for safety (Makers earn premium)
-        "skew_factor": 0.05,      # Inventory skew (Boosted from 0.01)
+        "base_spread": 0.20,      # Aggressive Spread (0.40/0.60)
+        "skew_factor": 0.10,      # High Skew (Dump inventory fast)
         "imbalance_threshold": 2.0,
         "imbalance_depth_n": 5,
         "overlay_bias": 0.005,
@@ -59,7 +59,6 @@ CONFIG = {
         # Risk / Extremes
         "extreme_low": 0.10,
         "extreme_high": 0.90,
-        "extreme_spread_mult": 2.0,
         "extreme_spread_mult": 2.0,
         "extreme_size_mult": 0.5,
         "stop_loss_pct": 0.10,    # 10% Trailing Stop
