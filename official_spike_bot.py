@@ -46,7 +46,7 @@ load_dotenv()
 # Safety Tuned Values from previous debugging
 CONFIG = {
     "strategy": {
-        "base_spread": 0.40,      # Wide spread for safety (Makers earn premium)
+        "base_spread": 0.60,      # Wide spread for safety (Makers earn premium)
         "skew_factor": 0.05,      # Inventory skew (Boosted from 0.01)
         "imbalance_threshold": 2.0,
         "imbalance_depth_n": 5,
@@ -65,7 +65,7 @@ CONFIG = {
     },
     "loop": {
         "tick_interval_ms": 2000,       # 2s interval (Rate Limit Safe)
-        "max_quote_age_seconds": 10.0,  # 10s max age (Stale Data Protection)
+        "max_quote_age_seconds": 45.0,  # 45s max age (Prevent self-cancel in slow markets)
         "replace_threshold": 0.001,
     }
 }
@@ -306,9 +306,13 @@ class MarketMakerBot:
             # API might return None for empty portfolio
             if positions is None: 
                 positions = []
+
+            # DEBUG: Dump positions occasionally to debug Inv=0 mystery
+            # logger.info(f"DEBUG POSITIONS: Found {len(positions)} positions {[p.market_id for p in positions]}")
             
-            # Find current market position
-            target = next((p for p in positions if p.market_id == self.market_id), None)
+            # Find current market position (Robust Case-Insensitive Match)
+            # Both self.market_id and p.market_id might have different casing
+            target = next((p for p in positions if p.market_id.lower() == self.market_id.lower()), None)
             
             if target:
                 # Net = YES - NO (scaled 1e6)
