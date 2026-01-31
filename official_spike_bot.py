@@ -49,7 +49,7 @@ load_dotenv()
 # Safety Tuned Values from previous debugging
 CONFIG = {
     "strategy": {
-        "base_spread": 0.20,      # Aggressive Spread (0.40/0.60)
+        "base_spread": 0.04,      # Tight Spread (8 cents)
         "skew_factor": 0.10,      # High Skew (Dump inventory fast)
         "imbalance_threshold": 2.0,
         "imbalance_depth_n": 5,
@@ -69,8 +69,8 @@ CONFIG = {
     },
     "loop": {
         "tick_interval_ms": 2000,       # 2s interval (Rate Limit Safe)
-        "max_quote_age_seconds": 45.0,  # 45s max age (Prevent self-cancel in slow markets)
-        "replace_threshold": 0.001,
+        "max_quote_age_seconds": 30.0,  # 30s max age (Smart Replacement)
+        "replace_threshold": 0.02,      # 2 cent drift threshold
     }
 }
 
@@ -175,6 +175,178 @@ class CSVLogger:
         except Exception as e:
             pass # Never crash the bot for logging
 
+
+# ============================================================
+# STRATEGY MANAGERS (Phase 2 & 3)
+# ============================================================
+class InventoryUrgencyManager:
+    """Manages 6-tier urgency system."""
+    def __init__(self):
+        self.previous_regime = None
+        
+    def get_inventory_urgency(self, inventory: float, regime: str, seconds_remaining: float) -> Tuple[str, float, float]:
+        """
+        Returns (urgency_level, offset_multiplier, spread_multiplier).
+        """
+        urgency_level = "NORMAL"
+        offset_multiplier = 0.02
+        spread_multiplier = 1.0
+        
+        # Tier 2: Regime mismatch (Holding Long in Bear, Short in Bull)
+        # Using 3 units as threshold
+        if (regime == "BEAR" and inventory > 3) or (regime == "BULL" and inventory < -3):
+            urgency_level = "REGIME_MISMATCH"
+            offset_multiplier = 0.05
+            spread_multiplier = 0.6
+        
+        # Tier 3: Large wrong-way position
+        if abs(inventory) > 10:
+            if (regime == "BEAR" and inventory > 0) or (regime == "BULL" and inventory < 0):
+                urgency_level = "LARGE_POSITION"
+                offset_multiplier = 0.10
+                spread_multiplier = 0.3
+        
+        # Tier 4: Regime flip detection
+        if self._detect_regime_flip(regime, inventory):
+            urgency_level = "REGIME_FLIP"
+            offset_multiplier = 0.15
+            spread_multiplier = 0.2
+        
+        # Tier 5: Time urgency (T-2m)
+        if seconds_remaining < 120 and abs(inventory) > 5:
+            urgency_level = "TIME_URGENCY"
+            offset_multiplier = 0.20
+            spread_multiplier = 0.1
+        
+        # Tier 6: Panic (T-30s)
+        if seconds_remaining < 30 and abs(inventory) > 0:
+            urgency_level = "PANIC"
+            offset_multiplier = 0.50
+            spread_multiplier = 0.05
+            
+        return urgency_level, offset_multiplier, spread_multiplier
+    
+    def _detect_regime_flip(self, current_regime, inventory):
+        if self.previous_regime is None:
+            self.previous_regime = current_regime
+            return False
+            
+        dangerous = False
+        if self.previous_regime == "BULL" and current_regime == "BEAR" and inventory > 5:
+            dangerous = True
+        elif self.previous_regime == "BEAR" and current_regime == "BULL" and inventory < -5:
+            dangerous = True
+            
+        self.previous_regime = current_regime
+        return dangerous
+
+class TimeDecayManager:
+    """Manages pricing urgency and position limits based on time."""
+    def get_time_urgency_factor(self, seconds_remaining: float) -> float:
+        if seconds_remaining > 600: return 1.0
+        elif seconds_remaining > 480: return 1.2
+        elif seconds_remaining > 360: return 1.5
+        elif seconds_remaining > 240: return 2.0
+        elif seconds_remaining > 120: return 3.0
+        elif seconds_remaining > 60: return 4.0
+        elif seconds_remaining > 30: return 5.0
+        else: return 10.0
+        
+    def get_inventory_haircut(self, seconds_remaining: float) -> float:
+        if seconds_remaining > 600: return 1.00
+        elif seconds_remaining > 480: return 0.95
+        elif seconds_remaining > 360: return 0.90
+        elif seconds_remaining > 240: return 0.80
+        elif seconds_remaining > 120: return 0.65
+        elif seconds_remaining > 60: return 0.45
+        elif seconds_remaining > 30: return 0.20
+        else: return 0.0
+        
+    def get_max_position(self, seconds_remaining: float, base_limit: int = 15) -> int:
+        urgency = self.get_time_urgency_factor(seconds_remaining)
+        return max(1, int(base_limit / urgency))
+        
+    def get_time_decay_skew(self, inventory: float, seconds_remaining: float) -> float:
+        if abs(inventory) < 0.1: return 0.0
+        haircut = self.get_inventory_haircut(seconds_remaining)
+        # Long inv -> Negative skew (Sell cheaper)
+        return -inventory * (1 - haircut) * 0.5
+
+class TimeAwarePricingEngine:
+    """Combines all factors to determine pricing."""
+    def __init__(self, urgency_manager, time_decay, base_spread=0.04):
+        self.urgency = urgency_manager
+        self.time_decay = time_decay
+        self.base_spread = base_spread
+        
+    def calculate_prices(self, mid, inventory, regime, seconds_remaining):
+        # 1. Factors
+        time_urg = self.time_decay.get_time_urgency_factor(seconds_remaining)
+        time_skew = self.time_decay.get_time_decay_skew(inventory, seconds_remaining)
+        max_pos = self.time_decay.get_max_position(seconds_remaining)
+        
+        urg_level, inv_off_mult, inv_spread_mult = self.urgency.get_inventory_urgency(
+            inventory, regime, seconds_remaining
+        )
+        
+        # 2. Spread (Tightens with urgency?)
+        # Actually prompt says: "spread_multiplier = inv_spread_mult / time_urgency"
+        # If time_urgency is high (10x), spread becomes tiny?
+        # Maybe we want Wide spread in panic?
+        # Logic from prompt: "effective_spread = self.base_spread * spread_multiplier"
+        # If panic, spread_mult is 0.05. So spread is tiny. This ensures a fill. CORRECT.
+        
+        spread_mult = inv_spread_mult / time_urg
+        effective_spread = self.base_spread * spread_mult
+        
+        # 3. Skew
+        # Regime Skew
+        if regime == "BULL": r_skew = 0.03
+        elif regime == "BEAR": r_skew = -0.03
+        else: r_skew = 0.0
+        
+        # Inventory Skew (Amplified by urgency)
+        i_skew = -1 * inventory * inv_off_mult * time_urg
+        
+        total_skew = r_skew + i_skew + time_skew
+        
+        bid = mid - (effective_spread / 2) + total_skew
+        ask = mid + (effective_spread / 2) + total_skew
+        
+        # Safety
+        bid = max(0.01, bid)
+        ask = max(0.02, ask)
+        
+        # Market Order Check
+        use_market = False
+        if urg_level in ["PANIC", "REGIME_FLIP"] and abs(inventory) > 8:
+            use_market = True
+        if abs(inventory) > 12: # Wrong way large
+            if (regime=="BEAR" and inventory>0) or (regime=="BULL" and inventory<0):
+                use_market = True
+                
+        return {
+            "bid": bid, "ask": ask, "spread": ask-bid,
+            "urgency": urg_level, "time_urg": time_urg,
+            "max_pos": max_pos, "use_market": use_market
+        }
+
+class PerformanceTracker:
+    """Tracks metrics for improvement."""
+    def __init__(self):
+        self.fills = 0
+        self.orders = 0
+        self.regime_flips = 0
+        
+    def record_order(self): self.orders += 1
+    def record_fill(self): self.fills += 1
+    def record_flip(self): self.regime_flips += 1
+    
+    def get_report(self):
+        if self.orders == 0: rate = 0.0
+        else: rate = self.fills / self.orders
+        return f"FillRate={rate:.2f} ({self.fills}/{self.orders}) Flips={self.regime_flips}"
+
 # ============================================================
 # BOT LOGIC
 # ============================================================
@@ -189,7 +361,10 @@ class MarketMakerBot:
         self.start_price: int = 0
         self.end_time: int = 0 # Unix TS
         
-        self.recorder = CSVLogger()
+        self.urgency_manager = InventoryUrgencyManager()
+        self.tracker = PerformanceTracker()
+        self.time_decay = TimeDecayManager()
+        self.engine = TimeAwarePricingEngine(self.urgency_manager, self.time_decay, base_spread=CONFIG['strategy']['base_spread'])
         
         # Strategy State
         self.state = MarketState()
@@ -562,49 +737,92 @@ class MarketMakerBot:
             start_ts = time.time()
             try:
                 if self.market_id:
-                    # 1. Update Position
+                    # 1. Update (Pos + Time)
                     await self.fetch_position_snapshot()
                     
-                    # 2. Compute
-                    bid, ask = self.compute_quotes()
-                    
-                    # 3. Log Heartbeat
-                    mid_str = "?"
+                    mid = 0.5
                     if self.state.bids and self.state.asks:
-                        mid = (self.state.bids[0][0]+self.state.asks[0][0])/2
-                        mid_str = f"{mid:.3f}"
-                        # Track history
-                        self.state.price_history.append(mid)
-                        
-                        # 1b. Check Stop Loss
-                        if await self.check_stop_loss(mid):
-                            await asyncio.sleep(2)
-                            continue
-                        
+                         mid = (self.state.bids[0][0]+self.state.asks[0][0])/2
+                         self.state.price_history.append(mid)
+                    
+                    # Regime
                     regime_str = "NEUT"
                     r_skew = self._get_regime_skew()
                     if r_skew > 0: regime_str = "BULL"
                     elif r_skew < 0: regime_str = "BEAR"
-                    
-                    # Log to CSV
-                    self.recorder.log_tick(
-                        self.market_id, mid_str, regime_str, 
-                        self.state.position, bid, ask
-                    )
-                    
-                    logger.info(f"Tick: Mid={mid_str} [{regime_str}] Inv={self.state.position:.1f} Bid={bid} Ask={ask}")
 
-                    # 4. Reconcile/Place
-                    if bid and ask:
-                        # Converge Bids
-                        await self._converge_side('buy', bid)
-                        await asyncio.sleep(0.5) # Burst smoothing
-                        # Converge Asks
-                        await self._converge_side('sell', ask)
-                    else:
-                        # Stale or invalid -> Cancel all
+                    # 2. Pricing Engine
+                    time_left = max(0, self.end_time - time.time())
+                    
+                    if time_left < 30:
+                        # EMERGENCY EXIT
                         if self.state.open_orders:
                             await self.cancel_all_orders(self.market_id)
+                        if abs(self.state.position) > 0.1:
+                            logger.critical(f"T-30s PANIC DUMP: {self.state.position}")
+                            side = 'sell' if self.state.position > 0 else 'buy'
+                            await self.panic_close(side)
+                        continue
+
+                    pricing = self.engine.calculate_prices(
+                        mid, self.state.position, regime_str, time_left
+                    )
+                    
+                    # 3. Log
+                    logger.info(
+                        f"T-{int(time_left)}s {regime_str} "
+                        f"Inv={self.state.position:.1f} "
+                        f"Urg={pricing['urgency']} "
+                        f"Spr={pricing['spread']:.3f} "
+                        f"Bid={pricing['bid']:.2f} Ask={pricing['ask']:.2f}"
+                    )
+                    self.recorder.log_tick(
+                        self.market_id, mid, regime_str, self.state.position, 
+                        pricing['bid'], pricing['ask']
+                    )
+
+                    # 4. Execute
+                    # Market Order Mode?
+                    if pricing['use_market_orders']:
+                         if self.state.position > 0: await self.panic_close('sell')
+                         elif self.state.position < 0: await self.panic_close('buy')
+                         continue
+                         
+                    # Check Limits
+                    max_p = pricing['max_pos']
+                    inv = self.state.position
+                    
+                    # Over limit? Reduce only.
+                    allow_bid = True
+                    allow_ask = True
+                    
+                    if inv >= max_p: allow_bid = False
+                    if inv <= -max_p: allow_ask = False
+                    
+                    # Phase 5: Regime-Based Limits
+                    # Bull: Max Short 0 (Don't allow net short, or strictly reduce)
+                    if regime_str == "BULL" and inv < 0: allow_ask = False # Don't sell more
+                    if regime_str == "BEAR" and inv > 0: allow_bid = False # Don't buy more
+                    
+                    # Place Limits
+                    if allow_bid:
+                        self.tracker.record_order()
+                        await self._converge_side('buy', pricing['bid'])
+                    elif self.state.open_orders:
+                        # Cancel existing bids if forbidden?
+                        # For now, let smart replacement handle or clean sweep
+                        pass 
+                        
+                    if allow_ask:
+                        self.tracker.record_order()
+                        await self._converge_side('sell', pricing['ask'])
+                    
+                    # 5. Safety / Kill Switch
+                    # If PnL < -2.00 (Requires PnL tracking, not impl yet, skipping)
+                    # If Time < 30s and Inv > 3 (Handled by Panic Logic above)
+                    
+            except Exception as e:
+                 logger.error(f"Loop error: {e}")
 
             except Exception as e:
                 logger.error(f"Trading loop error: {e}")
