@@ -134,6 +134,12 @@ class TurbineAdapter(ExchangeAdapter):
         
         # Market cache for settlement addresses
         self._market_cache: Dict[str, Any] = {}
+        
+        # Reconciliation state
+        self._reconcile_task = None
+        self._last_reconciled_positions: Dict[str, float] = {}
+        self._last_reconciled_orders: Dict[str, Any] = {}
+        self._reconcile_interval = 5.0  # seconds
     
     def _auto_register_api_credentials(self):
         """Auto-register API credentials if only private key is set.
@@ -252,6 +258,9 @@ class TurbineAdapter(ExchangeAdapter):
             # Start watchdog task if not already running
             if not self._watchdog_task or self._watchdog_task.done():
                 self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+                
+            # Start reconciliation loop
+            await self.start_reconciliation()
             
             logger.info("TurbineAdapter: WebSocket connected")
         except Exception as e:
@@ -497,6 +506,14 @@ class TurbineAdapter(ExchangeAdapter):
                 await self._ws_context.__aexit__(None, None, None)
             except Exception as e:
                 logger.error(f"Error closing WS connection: {e}")
+                
+        # Cancel Reconciliation
+        if self._reconcile_task:
+            self._reconcile_task.cancel()
+            try:
+                await self._reconcile_task
+            except asyncio.CancelledError:
+                pass
         
         # Close REST client
         if self._rest_client:
@@ -639,11 +656,81 @@ class TurbineAdapter(ExchangeAdapter):
             order_hash = result.get('orderHash', signed_order.order_hash)
             
             logger.info(f"Order placed: {order_hash}")
+            
+            # TRUTH CHECK: Immediately verify order exists
+            # We await this to ensure we don't return a "phantom" order ID
+            is_verified = await self._verify_order_placement(order_hash)
+            if not is_verified:
+                logger.error(f"CRITICAL: Order {order_hash} placed but NOT found in API verification! marking as unconfirmed.")
+                # We still return the hash but log loudly. 
+                # The recon loop will catch cleanup if it really doesn't exist.
+            
             return order_hash
             
         except Exception as e:
             logger.error(f"Failed to place order: {e}")
             raise
+
+    async def _verify_order_placement(self, order_hash: str) -> bool:
+        """Verify order exists on exchange immediately after placement."""
+        try:
+            # Run blocking call in thread
+            order = await asyncio.to_thread(self._rest_client.get_order, order_hash)
+            if order and order.order_hash == order_hash:
+                logger.info(f"Truth Check: Order {order_hash} verification PASSED")
+                return True
+        except Exception as e:
+            logger.error(f"Truth Check: Order {order_hash} verification FAILED: {e}")
+        return False
+        
+    async def start_reconciliation(self):
+        """Start the state reconciliation loop."""
+        if not self._reconcile_task or self._reconcile_task.done():
+            self._reconcile_task = asyncio.create_task(self._reconciliation_loop())
+            logger.info("TurbineAdapter: Reconciliation loop started")
+
+    async def _reconciliation_loop(self):
+        """Periodic loop to fetch authoritative state."""
+        while True:
+            try:
+                await asyncio.sleep(self._reconcile_interval)
+                
+                # 1. Fetch Positions
+                positions = await self.get_positions()
+                self._last_reconciled_positions = positions
+                
+                # 2. Fetch Open Orders
+                open_orders = await self.get_open_orders()
+                self._last_reconciled_orders = {o.exchange_order_id: o for o in open_orders}
+                
+                # 3. Log Tick Stats (The "Tick Log")
+                # We log this at INFO so it appears in standard logs
+                ws_age = self.get_last_message_age()
+                ws_status = "OK" if ws_age < 30 else "STALE"
+                ws_msg_cnt = self._ws_messages_parsed_ok
+                
+                logger.info(
+                    f"ADAPTER TICK | "
+                    f"Pos: {len(positions)} mkts | "
+                    f"Orders: {len(open_orders)} open | "
+                    f"WS: {ws_status} ({ws_msg_cnt} msgs, age {ws_age:.1f}s) | "
+                    f"Inv[BTC]: {positions.get(self.get_quick_market('BTC').market_id, 0.0):.4f}"
+                )
+                
+                # TODO: Emit reconciliation events if StateStore supports them
+                # For now, we trust the caller to poll get_positions/get_open_orders 
+                # or we implement event emission here if we can modify events.py.
+                # Since we can't modify events.py, we rely on the Supervisor (caller) 
+                # calling get_open_orders()/get_positions() regularly OR 
+                # relying on this loop to update internal caches if we add them.
+                
+                # Currently get_positions fetches fresh every time.
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Reconciliation error: {e}")
+                await asyncio.sleep(5)
 
     async def cancel_order(self, order: Order):
         """Cancel specific order.

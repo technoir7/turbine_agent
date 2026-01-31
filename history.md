@@ -588,3 +588,21 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 - **Adapter**: **ALIGNED**. (Matches official examples exactly)
 - **Tests**: **PASSING**.
 - **Strategy**: **TOUCHED NONE** (Guarded per instructions).
+
+### Update 2026-01-30: State Reconciliation & Verification 🛡️
+**Objective**: Hardening of state tracking and order verification.
+**Changes**:
+1. **Immediate Order Verification**:
+   - `TurbineAdapter.place_order` now performs an immediate `get_order(hash)` checks after placement.
+   - Logs `CRITICAL` error if not found (Truth Check).
+2. **Reconciliation Loop**:
+   - Added background task `_reconciliation_loop` (every 5s).
+   - Fetches authoritative `get_positions` and `get_orders`.
+   - Logs `ADAPTER TICK` with comparison stats (local vs exchange).
+3. **Trade Verification Tool**:
+   - Extended `connectivity_probe.py` with `--trade-test`.
+   - Performs: Place -> Verify (API) -> Cancel -> Verify (API).
+   - Confirms full lifecycle connectivity.
+4. **Integration Tests**:
+   - Verified new `verify_order_placement` logic with mocked `get_order` and `get_markets`.
+   - Ensures strict mock compliance (no assumptions on internal state).

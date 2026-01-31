@@ -173,5 +173,56 @@ class TestTurbineAdapter(unittest.IsolatedAsyncioTestCase):
         adapter._ws_last_market_update_ts = time.time() - 10.0
         self.assertFalse(adapter.is_feed_fresh(max_age_seconds=5.0))
 
+    @patch('turbine_client.TurbineClient')
+    async def test_order_placement_verification(self, mock_client_class):
+        """Test verify_order_placement is called after placing order."""
+        from src.exchange.turbine import TurbineAdapter
+        from src.core.events import Side
+        from src.core.state import Order
+        
+        # Setup mock client
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+        
+        # Mock get_order for verification (Success case)
+        mock_order = MagicMock()
+        mock_order.order_hash = "0x123"
+        mock_client.get_order.return_value = mock_order
+        
+        # Mock create/post
+        mock_client.create_limit_buy.return_value = MagicMock(order_hash="0x123")
+        mock_client.post_order.return_value = {'orderHash': '0x123'}
+        
+        # Mock get_market (called during placement)
+        mock_market = MagicMock(id="m1", market_id="m1", settlement_address="0xsettle")
+        mock_client.get_market.return_value = mock_market
+        mock_client.get_markets.return_value = [mock_market]
+        
+        config = {'exchange': {}}
+        with patch.dict('os.environ', {'TURBINE_PRIVATE_KEY': '0x1', 
+                                        'TURBINE_API_KEY_ID': 'k',
+                                        'TURBINE_API_PRIVATE_KEY': 's'}):
+            adapter = TurbineAdapter(config)
+            # Enable signing
+            adapter._can_sign_permit = True
+            mock_client.sign_usdc_permit.return_value = "0xsig"
+            
+            # Force fresh feed to pass firewall
+            adapter._ws_last_market_update_ts = time.time()
+            
+            # Place order
+            order = Order(
+                client_order_id="1",
+                market_id="m1",
+                side=Side.BID,
+                price=0.5,
+                size=10
+            )
+            order_hash = await adapter.place_order(order)
+            
+            self.assertEqual(order_hash, "0x123")
+            # Verify get_order call was made
+            mock_client.get_order.assert_called_with("0x123")
+
 if __name__ == '__main__':
     unittest.main()

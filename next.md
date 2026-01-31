@@ -153,7 +153,10 @@
 - ✅ Quick market rollover support via `get_quick_market("BTC")`
 - ✅ Price/size decimal conversions verified
 - ✅ Settlement addresses fetched from `get_markets()` and cached
+- ✅ State Reconciliation: Periodic "ADAPTER TICK" logs authoritative position/order counts
+- ✅ Trade Verification: `connectivity_probe.py --trade-test` proves ability to place/cancel
 
 ### Open Questions
 - Need to implement full event translation layer to connect WS messages to state updates (partially done in Adapter now, need Supervisor hookup)
 - Quick market instant rollover: `subscribe_quick_markets()` does NOT exist in installed client (verified via Probe failure). Must stick to polling or use `subscribe` on specific markets.
+- WS User Fills: Currently relying on HTTP polling (5s loop) for position updates. Need to verify if `trade` event covers own trades effectively or if specific `fill` event exists.
