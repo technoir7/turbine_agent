@@ -47,7 +47,7 @@ load_dotenv()
 CONFIG = {
     "strategy": {
         "base_spread": 0.40,      # Wide spread for safety (Makers earn premium)
-        "skew_factor": 0.01,      # Inventory skew
+        "skew_factor": 0.05,      # Inventory skew (Boosted from 0.01)
         "imbalance_threshold": 2.0,
         "imbalance_depth_n": 5,
         "overlay_bias": 0.005,
@@ -347,6 +347,15 @@ class MarketMakerBot:
         # Inventory Skew
         pos = self.state.position
         max_pos = CONFIG['risk']['max_inventory_units']
+        
+        # Hard Limits (Stop quoting if full)
+        allow_bid = True
+        allow_ask = True
+        if pos >= max_pos:
+            allow_bid = False
+        if pos <= -max_pos:
+            allow_ask = False
+            
         skew = -1 * (pos / max_pos) * strat['skew_factor']
 
         # Quote
@@ -358,7 +367,12 @@ class MarketMakerBot:
         ask_p = max(strat['min_price'], min(ask_p, strat['max_price']))
 
         if bid_p >= ask_p: return None, None
-        return bid_p, ask_p
+        
+        # Apply Hard Limits
+        final_bid = bid_p if allow_bid else None
+        final_ask = ask_p if allow_ask else None
+        
+        return final_bid, final_ask
 
     async def trading_loop(self):
         """Main Maker Loop (2s interval)."""
@@ -376,7 +390,7 @@ class MarketMakerBot:
                     mid_str = "?"
                     if self.state.bids and self.state.asks:
                         mid_str = f"{(self.state.bids[0][0]+self.state.asks[0][0])/2:.3f}"
-                    # logger.info(f"Tick: Mid={mid_str} Inv={self.state.position} Bid={bid} Ask={ask}")
+                    logger.info(f"Tick: Mid={mid_str} Inv={self.state.position:.1f} Bid={bid} Ask={ask}")
 
                     # 4. Reconcile/Place
                     if bid and ask:
@@ -425,7 +439,10 @@ class MarketMakerBot:
                 # We use stored order_hash as index
                 self.client.cancel_order(order_hash=existing_id, market_id=self.market_id)
             except Exception as e:
-                logger.warning(f"Cancel failed for {existing_id}: {e}")
+                if "404" in str(e) or "not found" in str(e).lower():
+                    logger.info(f"Order {existing_id} already gone (Filled?). Cleared.")
+                else:
+                    logger.warning(f"Cancel failed for {existing_id}: {e}")
             finally:
                 # Always remove strict tracking. If it failed, it's gone or we can't manage it anyway.
                 # Better to clear it than to loop infinitely creating duplicates.
