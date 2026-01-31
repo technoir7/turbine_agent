@@ -44,7 +44,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING) # Silence poll noise
 # --- Configuration & Constants ---
 DEFAULT_CONFIG = {
     "strategy": {
-        "base_spread": 0.20,
+        "base_spread": 0.30,
         "skew_factor": 0.01,
         "imbalance_threshold": 2.0,
         "imbalance_depth_n": 5,
