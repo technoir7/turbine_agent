@@ -397,8 +397,8 @@ class TurbineAdapter(ExchangeAdapter):
         import time
         logger.info("TurbineAdapter: Watchdog started")
         
-        # Default 60s per user request.
-        stall_threshold = float(os.environ.get("TURBINE_WS_STALL_SECONDS", "60.0"))
+        # Default 25s (less than the 30s stale limit) to prevent lockout
+        stall_threshold = float(os.environ.get("TURBINE_WS_STALL_SECONDS", "25.0"))
         logger.info(f"TurbineAdapter: Watchdog threshold set to {stall_threshold}s")
         
         while True:
