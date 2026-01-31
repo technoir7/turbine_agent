@@ -39,6 +39,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("SpikeBot")
+logging.getLogger("httpx").setLevel(logging.WARNING) # Silence poll noise
 
 # --- Configuration & Constants ---
 DEFAULT_CONFIG = {
@@ -451,10 +452,19 @@ class TurbineSpike:
              
         self.adapter.callbacks.append(on_msg)
         
-        # Trigger message processing loop if needed?
-        # Adapter.connect() starts _process_ws_messages() (via _ws_task).
-        # So we just need to register callback.
-        
+        # 4. Wait for Data (Connectivity Check)
+        logger.info("Waiting for market data...")
+        for i in range(10):
+            if self.state.last_update_ts > 0:
+                mid = "?"
+                if self.state.bids and self.state.asks:
+                    mid = f"{(self.state.bids[0][0] + self.state.asks[0][0])/2:.4f}"
+                logger.info(f"✅ DATA RECEIVED. Connected to {self.market_id}. Mid={mid}")
+                break
+            await asyncio.sleep(1)
+            if i == 9:
+                 logger.warning("❌ NO DATA RECEIVED yet. Check connection/market activity.")
+
         logger.info("Starting Main Loop...")
         try:
             while self.running:
@@ -463,21 +473,22 @@ class TurbineSpike:
                 if int(time.time()) % 10 == 0:
                      latest = await self._fetch_active_market()
                      if latest and latest != self.market_id:
-                         logger.info(f"Rollover! {self.market_id} -> {latest}")
+                         logger.info(f"\n{'='*40}\nROLLOVER DETECTED\nOld: {self.market_id}\nNew: {latest}\n{'='*40}\n")
                          await self.cancel_all_local()
                          self.market_id = latest
                          await self.adapter.subscribe_markets([self.market_id])
                          self.state = MarketState() # Reset
+                         # Re-verify data flow on switch?
                 
                 # B. Logic
                 await self.reconcile()
                 
-                # C. Heartbeat Log
-                if int(time.time()) % 10 == 0:
+                # C. Heartbeat Log (Reduced frequency: 60s)
+                if int(time.time()) % 60 == 0:
                     mid = "?"
                     if self.state.bids and self.state.asks:
                          mid = f"{ (self.state.bids[0][0] + self.state.asks[0][0])/2 :.3f}"
-                    logger.info(f"Tick: Mid={mid} Orders={len(self.state.open_orders)} Inv={self.state.position}")
+                    logger.info(f"Tick: Mid={mid} Orders={len(self.state.open_orders)} Inv={self.state.position} (Age: {time.time()-self.state.last_update_ts:.1f}s)")
 
                 await asyncio.sleep(self.config['loop']['tick_interval_ms'] / 1000.0)
                 
