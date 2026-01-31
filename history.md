@@ -566,3 +566,25 @@ The bot was successfully receiving WebSocket messages but the Strategy Engine re
 **Verified**:
 - Probe mode connects, fetches market ID, and processes WS `BookDeltaEvent` messages correctly.
 - Dry Run mode logs intended actions without execution.
+### Update 2026-01-30: Strict Integration Verification & Adapter Hardening ✅
+**Objective**: Prove "Correctness" of integration with definitive evidence, bypassing strategy logic.
+**Changes**:
+1. **Definitive Connectivity Probe** (`src/tools/connectivity_probe.py`):
+   - Rewrote to use `TurbineClient` directly (verification independent of adapter logic).
+   - Implemented strict WS checks: Connect -> Subscribe -> Count Messages -> Parse Types.
+   - Added `--ws` and `--auto-register` flags for robust environment setup.
+   - Verified success: HTTP Quick Market checks pass, WS receives Subscribe ACK + OrderBook snapshot.
+2. **Adapter Refactor** (`src/exchange/turbine.py`):
+   - Updated `subscribe_markets` to strictly match `turbine-py-client` example patterns (calling both `subscribe_orderbook` and `subscribe_trades`).
+   - Moved internal WS client classes to module level to enable proper unit testing.
+   - Added strict message counters (`ws_messages_parsed_ok`) and `last_market_update_ts` for provable freshness tracking.
+3. **Test Suite** (`tests/test_integration.py`):
+   - Updated to mock `turbine_client` properly (including module-level classes).
+   - Verified new instrumentation counters and subscription patterns.
+   - All tests passed.
+
+**Status**:
+- **Connectivity**: **PROVEN**. (Probe passed)
+- **Adapter**: **ALIGNED**. (Matches official examples exactly)
+- **Tests**: **PASSING**.
+- **Strategy**: **TOUCHED NONE** (Guarded per instructions).

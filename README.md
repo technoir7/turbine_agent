@@ -173,11 +173,18 @@ The agent monitors the relative depth of the top 5 levels of the orderbook.
     # Install runtime helpers
     pip install python-dotenv httpx
     ```
-3.  **Verify Setup with Read-Only Probe**:
+3.  **Verify Setup with Definitive Connectivity Probe**:
     ```bash
+    # Basic HTTP Check (Read-Only)
     python -m src.tools.connectivity_probe
+
+    # Full Integration Check (HTTP + WebSocket)
+    python -m src.tools.connectivity_probe --ws --seconds 15
+
+    # Auto-Register API Credentials (if missing)
+    python -m src.tools.connectivity_probe --auto-register
     ```
-    Expected: BTC market details, orderbook snapshot, total markets count.
+    Expected: "CONNECTIVITY PROBE PASSED" with counts of messages received.
 
 4.  **Run Simulation (No Trading)**:
     ```bash

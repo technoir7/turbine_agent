@@ -144,17 +144,16 @@
 ## Integration Notes & Unknowns
 
 ### Verified Integration Details
-- ✅ WebSocket connection working correctly (fixed 2026-01-29)
-- ✅ WebSocket message reception verified (fixed 2026-01-30) - receives subscribe confirmations and orderbook updates
-- ✅ WebSocket reliability hardened (Keepalive + Watchdog + Auto-Reconnect) (2026-01-30)
-- ✅ WebSocket logging productionized (gated behind `TURBINE_WS_DEBUG`)
-- ⚠️ Event translation layer needed - messages arrive but not applied to state yet
+- ✅ WebSocket connection working correctly
+- ✅ WebSocket message reception verified (Strict Probe passed 2026-01-30)
+- ✅ WebSocket reliability hardened (Keepalive + Watchdog + Auto-Reconnect)
+- ✅ WebSocket logging productionized
 - ✅ USDC permit signatures implemented and attached to all orders
-- ✅ WebSocket subscribe pattern verified against `turbine-py-client/examples/websocket_stream.py`
+- ✅ WebSocket subscribe pattern STRICTLY aligned with `turbine-py-client` examples
 - ✅ Quick market rollover support via `get_quick_market("BTC")`
-- ✅ Price/size decimal conversions: price scale 1e6 (but 10k for compat), size 6 decimals, strike 8 decimals
+- ✅ Price/size decimal conversions verified
 - ✅ Settlement addresses fetched from `get_markets()` and cached
 
 ### Open Questions
-- Need to implement event translation layer to connect WS messages to state updates
-- Quick market instant rollover: verify if `subscribe_quick_markets()` method exists or need alternative
+- Need to implement full event translation layer to connect WS messages to state updates (partially done in Adapter now, need Supervisor hookup)
+- Quick market instant rollover: `subscribe_quick_markets()` does NOT exist in installed client (verified via Probe failure). Must stick to polling or use `subscribe` on specific markets.

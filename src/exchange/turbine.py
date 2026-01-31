@@ -11,8 +11,42 @@ from ..core.state import Order
 logger = logging.getLogger(__name__)
 
 # Verified constants from turbine-py-client examples
-DEFAULT_HOST = "https://api.turbinefi.com"
 DEFAULT_CHAIN_ID = 137  # Polygon mainnet
+DEFAULT_HOST = "https://api.turbinefi.com"
+
+# Module-level imports for testability
+try:
+    from turbine_client import TurbineClient, TurbineWSClient
+    from turbine_client.ws.client import WSStream
+    import websockets
+    from contextlib import asynccontextmanager
+    from typing import AsyncIterator
+
+    class RobustTurbineWSClient(TurbineWSClient):
+        """Subclass to inject keepalive settings into websockets.connect."""
+        
+        @asynccontextmanager
+        async def connect(self) -> AsyncIterator[WSStream]:
+            """Connect with ping_interval=20, ping_timeout=20."""
+            try:
+                # 20s ping interval, 20s timeout (total 40s tolerance)
+                self._connection = await websockets.connect(
+                    self.url, 
+                    ping_interval=20, 
+                    ping_timeout=20
+                )
+                stream = WSStream(self._connection)
+                yield stream
+            finally:
+                if self._connection:
+                    await self._connection.close()
+                    self._connection = None
+
+except ImportError:
+    # Allow module load even if dependencies missing (will fail at runtime)
+    TurbineClient = None
+    TurbineWSClient = object  # dummy base
+    RobustTurbineWSClient = None
 
 
 class TurbineAdapter(ExchangeAdapter):
@@ -87,8 +121,14 @@ class TurbineAdapter(ExchangeAdapter):
         self._ws_context = None
         self._ws_connection = None
         self._ws_task = None
-        self._ws_message_count = 0  # For debug logging
-        self._ws_last_message_ts = None  # For heartbeat monitoring
+        
+        # Instrumentation
+        self._ws_message_count = 0 
+        self._ws_messages_total = 0  # Total raw messages
+        self._ws_messages_parsed_ok = 0  # Valid typed messages
+        self._ws_last_message_ts = None  # Any message
+        self._ws_last_market_update_ts = None  # Market data (book/trade)
+        
         self._active_subscriptions: Set[str] = set()
         self._watchdog_task = None
         
@@ -188,32 +228,8 @@ class TurbineAdapter(ExchangeAdapter):
     async def connect(self):
         """Connect to WebSocket and start listening for updates."""
         try:
-            from turbine_client import TurbineWSClient
-            import websockets
-            from contextlib import asynccontextmanager
-            from typing import AsyncIterator
-            from turbine_client.ws.client import WSStream
-
-            # Define Robust Client with Keepalive (Monkeypatch/Subclass strategy)
-            class RobustTurbineWSClient(TurbineWSClient):
-                """Subclass to inject keepalive settings into websockets.connect."""
-                
-                @asynccontextmanager
-                async def connect(self) -> AsyncIterator[WSStream]:
-                    """Connect with ping_interval=20, ping_timeout=20."""
-                    try:
-                        # 20s ping interval, 20s timeout (total 40s tolerance)
-                        self._connection = await websockets.connect(
-                            self.url, 
-                            ping_interval=20, 
-                            ping_timeout=20
-                        )
-                        stream = WSStream(self._connection)
-                        yield stream
-                    finally:
-                        if self._connection:
-                            await self._connection.close()
-                            self._connection = None
+            if RobustTurbineWSClient is None:
+                raise ImportError("turbine-py-client not installed")
 
             # Use ws:// variant of the host
             ws_url = self.config.get('exchange', {}).get('ws_url', self._host)
@@ -243,12 +259,10 @@ class TurbineAdapter(ExchangeAdapter):
             raise
 
     def get_last_message_age(self) -> float:
-        """Get time in seconds since last WebSocket message."""
-        if not self._ws_last_message_ts:
+        """Get time in seconds since last *valid market data* message."""
+        if not self._ws_last_market_update_ts:
             return float('inf')
-        # If last_ts is None, return inf. If set, diff.
-        # But wait, self._ws_last_message_ts is float or None.
-        return time.time() - self._ws_last_message_ts
+        return time.time() - self._ws_last_market_update_ts
 
     def is_feed_fresh(self, max_age_seconds: float) -> bool:
         """Check if WebSocket feed is fresh."""
@@ -261,6 +275,7 @@ class TurbineAdapter(ExchangeAdapter):
         
         try:
             async for message in self._ws_connection:
+                self._ws_messages_total += 1
                 self._ws_message_count += 1
                 self._ws_last_message_ts = time.time()
                 
@@ -272,6 +287,12 @@ class TurbineAdapter(ExchangeAdapter):
                 # Log message type for all messages at DEBUG level
                 msg_type = getattr(message, 'type', 'unknown')
                 market_id = getattr(message, 'market_id', 'unknown')
+                
+                # Count parsed messages
+                if msg_type in ['orderbook', 'trade', 'order_cancelled']:
+                    self._ws_messages_parsed_ok += 1
+                    self._ws_last_market_update_ts = time.time()
+                
                 display_id = str(market_id) if market_id else 'None'
                 logger.debug(f"TurbineAdapter: WS {msg_type} for {display_id[:16]}...")
                 
@@ -421,27 +442,8 @@ class TurbineAdapter(ExchangeAdapter):
         # 3. Connect again
         try:
             # Re-use logic from connect(), using RobustTurbineWSClient
-            from turbine_client import TurbineWSClient
-            import websockets
-            from contextlib import asynccontextmanager
-            from typing import AsyncIterator
-            from turbine_client.ws.client import WSStream
-
-            class RobustTurbineWSClient(TurbineWSClient):
-                @asynccontextmanager
-                async def connect(self) -> AsyncIterator[WSStream]:
-                    try:
-                        self._connection = await websockets.connect(
-                            self.url, 
-                            ping_interval=20, 
-                            ping_timeout=20
-                        )
-                        stream = WSStream(self._connection)
-                        yield stream
-                    finally:
-                        if self._connection:
-                            await self._connection.close()
-                            self._connection = None
+            if RobustTurbineWSClient is None:
+                 raise ImportError("turbine-py-client not installed")
 
             ws_url = self.config.get('exchange', {}).get('ws_url', self._host)
             self._ws_client = RobustTurbineWSClient(host=ws_url)
@@ -460,7 +462,9 @@ class TurbineAdapter(ExchangeAdapter):
             if self._active_subscriptions:
                 logger.info(f"TurbineAdapter: Resubscribing to {len(self._active_subscriptions)} markets...")
                 for market_id in self._active_subscriptions:
-                    await self._ws_connection.subscribe(market_id)
+                    # Match strict pattern: both aliases
+                    await self._ws_connection.subscribe_orderbook(market_id)
+                    await self._ws_connection.subscribe_trades(market_id)
                 logger.info("TurbineAdapter: Resubscribed")
                 
         except Exception as e:
@@ -526,11 +530,11 @@ class TurbineAdapter(ExchangeAdapter):
         
         for market_id in market_ids:
             try:
-                # subscribe() sends {"type": "subscribe", "marketId": market_id}
-                # This subscribes to ALL updates: orderbook, trades, order_cancelled
-                # subscribe_orderbook() and subscribe_trades() are just aliases that call subscribe()
-                # Calling both would subscribe twice to the same market, causing WS close
-                await self._ws_connection.subscribe(market_id)
+                # Per turbine-py-client/examples/websocket_stream.py
+                # Explicitly call both for strict compliance, even if aliases
+                await self._ws_connection.subscribe_orderbook(market_id)
+                await self._ws_connection.subscribe_trades(market_id)
+                
                 self._active_subscriptions.add(market_id)  # Track for watchdog reconnect
                 logger.debug(f"Subscribed to {market_id[:16]}...")
             except Exception as e:
