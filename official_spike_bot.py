@@ -164,15 +164,16 @@ class MarketMakerBot:
         # Loop Control
         self.last_poll_ts = 0.0
 
-    async def get_active_market(self) -> Tuple[str, int, int]:
+    async def get_active_market(self) -> Optional[Tuple[str, int, int]]:
         """Get the currently active BTC quick market."""
-        while True:
-            try:
-                quick_market = await asyncio.to_thread(self.client.get_quick_market, "BTC")
-                return quick_market.market_id, quick_market.end_time, quick_market.start_price
-            except Exception as e:
-                logger.error(f"Failed to fetch quick market: {e}. Retrying in 5s...")
-                await asyncio.sleep(5)
+        try:
+            # We attempt ONCE. If API error/None, we return None.
+            # The retry logic belongs in the caller if needed.
+            quick_market = await asyncio.to_thread(self.client.get_quick_market, "BTC")
+            return quick_market.market_id, quick_market.end_time, quick_market.start_price
+        except Exception as e:
+            logger.warning(f"Could not fetch active market: {e}")
+            return None
 
     async def cancel_all_orders(self, market_id: str) -> None:
         """Cancel all local active orders."""
@@ -227,9 +228,14 @@ class MarketMakerBot:
         """Background task to handle market rollovers."""
         while self.running:
             try:
-                new_market_id, end_time, start_price = await self.get_active_market()
-                if new_market_id != self.market_id:
-                    await self.switch_to_new_market(new_market_id, start_price)
+                res = await self.get_active_market()
+                if res:
+                    new_market_id, end_time, start_price = res
+                    if new_market_id != self.market_id:
+                        await self.switch_to_new_market(new_market_id, start_price)
+                else:
+                    # No active market found, wait and retry
+                    pass
             except Exception as e:
                 logger.error(f"Market monitor error: {e}")
             await asyncio.sleep(5)
@@ -531,11 +537,19 @@ class MarketMakerBot:
         
         logger.info("Bot Started. Waiting for market...")
         
-        # ensure we have a market logic
-        m, _, s = await self.get_active_market()
-        await self.switch_to_new_market(m, s)
+        # ensure we have a market logic -> REMOVED BLOCKING CALL
+        # m, _, s = await self.get_active_market()
+        # await self.switch_to_new_market(m, s)
+        
+        # We rely on monitor_market_transitions to pick up the market.
+        # Main loop just handles WS connection when market is set.
 
         while self.running:
+            if not self.market_id:
+                logger.info("Waiting for active market...")
+                await asyncio.sleep(5)
+                continue
+
             try:
                 async with ws.connect() as stream:
                     await stream.subscribe_orderbook(self.market_id)
